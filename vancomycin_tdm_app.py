@@ -42,14 +42,17 @@ except Exception as e:
 # --- 3. IMPORTS (Place imports after key check to avoid errors if key fails) ---
 try:
     from pypdf import PdfReader
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.embeddings import OpenAIEmbeddings
-    from langchain.vectorstores import FAISS
-    from langchain.chains import RetrievalQA
-    from langchain.llms import OpenAI
+    from langchain.text_splitter import RecursiveCharacterTextSplitter # Still in langchain core
+    # Updated imports for newer Langchain structure:
+    from langchain_openai import OpenAIEmbeddings # Moved to langchain-openai
+    from langchain_community.vectorstores import FAISS # Moved to langchain-community
+    from langchain.chains import RetrievalQA # Still in langchain core (usually)
+    from langchain_openai import OpenAI # LLM moved to langchain-openai
+
     logging.info("Required libraries imported successfully.")
 except ImportError as e:
-    st.error(f"Failed to import required libraries: {e}. Please ensure all dependencies are installed (streamlit, pypdf, langchain, openai, faiss-cpu, tiktoken).")
+    # Updated error message to include the new packages
+    st.error(f"Failed to import required libraries: {e}. Please ensure all dependencies are installed (streamlit, pypdf, langchain, langchain-community, langchain-openai, faiss-cpu, tiktoken). You might need to run: pip install -U langchain langchain-community langchain-openai faiss-cpu tiktoken")
     logging.error(f"Failed to import required libraries: {e}")
     st.stop()
 
