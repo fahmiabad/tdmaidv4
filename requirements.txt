@@ -1,6 +1,7 @@
 streamlit
 pypdf
 langchain
-openai
-faiss-cpu  
+langchain-community # Add this
+langchain-openai   # Add this
+faiss-cpu         # or faiss-gpu
 tiktoken
