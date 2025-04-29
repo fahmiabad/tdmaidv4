@@ -1,8 +1,7 @@
 # vancomycin_tdm_app.py
 """
 Single-file Streamlit app for Vancomycin TDM with RAG-guided LLM interpretation,
-time-based inputs, and target-level selection.
-Handles fallback if PyPDFLoader isn’t available.
+time-based inputs, target-level selection, and PDF chunking via pypdf.
 """
 import os
 import math
@@ -12,34 +11,43 @@ from datetime import datetime, timedelta, time
 # --- 1. SECRET ---
 os.environ["OPENAI_API_KEY"] = "YOUR_OPENAI_API_KEY"
 
-# --- 2. IMPORT & FALLBACK FOR RAG LOADER ---
-try:
-    from langchain.document_loaders import PyPDFLoader
-except ImportError:
-    from langchain.document_loaders.unstructured import UnstructuredPDFLoader as PyPDFLoader
+# --- 2. IMPORTS ---
+from pypdf import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 from langchain.llms import OpenAI
 
-# --- 3. LOAD & INDEX GUIDELINE PDF ---
+# --- 3. LOAD & INDEX GUIDELINE PDF USING pypdf ---
 @st.cache_resource
 def load_rag_chain(pdf_path: str) -> RetrievalQA:
-    loader = PyPDFLoader(pdf_path)
-    docs = loader.load()
+    # Extract full text
+    reader = PdfReader(pdf_path)
+    full_text = ""
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            full_text += text + "\n"
+    # Chunk text
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    chunks = splitter.split_documents(docs)
+    chunks = splitter.split_text(full_text)
+    # Embed and index
     embeddings = OpenAIEmbeddings()
-    index = FAISS.from_documents(chunks, embeddings)
+    index = FAISS.from_texts(chunks, embeddings)
+    # Build QA chain
     qa = RetrievalQA.from_chain_type(
-        llm=OpenAI(temperature=0), chain_type="stuff", retriever=index.as_retriever()
+        llm=OpenAI(temperature=0),
+        chain_type="stuff",
+        retriever=index.as_retriever()
     )
     return qa
 
-qa_chain = load_rag_chain('clinical-pharmacokinetics-pharmacy-handbook-ccph-2nd-edition-rev-2.0_0-2.pdf')
+qa_chain = load_rag_chain(
+    'clinical-pharmacokinetics-pharmacy-handbook-ccph-2nd-edition-rev-2.0_0-2.pdf'
+)
 
-# --- 4. TIME HELPER ---
+# --- 4. TIME DIFFERENCE HELPER ---
 def hours_diff(start: time, end: time) -> float:
     today = datetime.today().date()
     dt_start = datetime.combine(today, start)
@@ -48,7 +56,7 @@ def hours_diff(start: time, end: time) -> float:
         dt_end += timedelta(days=1)
     return (dt_end - dt_start).total_seconds() / 3600
 
-# --- 5. PK CALC ---
+# --- 5. PK CALC FUNCTIONS ---
 def calculate_crcl(age, weight, scr, female=False):
     base = ((140 - age) * weight) / (72 * scr)
     return base * 0.85 if female else base
@@ -70,7 +78,9 @@ def calculate_ke_trough(dose_int, vd, trough, interval_h):
     cmax = trough + dose_int / vd
     return math.log(cmax / trough) / interval_h
 
-def calculate_new_dose_trough(dose_int, vd, trough, interval_h, target=15.0):
+def calculate_new_dose_trough(
+    dose_int, vd, trough, interval_h, target=15.0
+):
     ke = calculate_ke_trough(dose_int, vd, trough, interval_h)
     if ke <= 0:
         return dose_int
@@ -84,8 +94,12 @@ def calculate_auc24_trough(dose_int, vd, trough, interval_h):
     cl = ke * vd
     return daily / cl
 
-def calculate_prepost(cmin, cpost, infusion_h, peak_delay_h, interval_h):
-    ke = math.log(cmin / cpost) / (interval_h - infusion_h - peak_delay_h)
+def calculate_prepost(
+    cmin, cpost, infusion_h, peak_delay_h, interval_h
+):
+    ke = math.log(cmin / cpost) / (
+        interval_h - infusion_h - peak_delay_h
+    )
     half = math.log(2) / ke
     cmax = cpost * math.exp(ke * peak_delay_h)
     auc_inf = infusion_h * (cmin + cmax) / 2
@@ -93,7 +107,7 @@ def calculate_prepost(cmin, cpost, infusion_h, peak_delay_h, interval_h):
     auc24 = (auc_inf + auc_elim) * (24 / interval_h)
     return {'ke': ke, 't_half': half, 'Cmax': cmax, 'Cmin': cmin, 'AUC24': auc24}
 
-# --- 6. INTERPRETATION ---
+# --- 6. LLM INTERPRETATION ---
 def interpret(crcl, res, target_level):
     prompt = f"""
 You are a clinical pharmacokinetics expert. Using the guideline:
@@ -106,13 +120,15 @@ Provide concise interpretation, dosing recommendation, and rationale.
 
 # --- 7. STREAMLIT UI ---
 st.set_page_config(page_title="Vancomycin TDM App", layout="wide")
-st.title("🧪 Vancomycin TDM with Fallback RAG Loader")
+st.title("🧪 Vancomycin TDM with pypdf Chunking & RAG")
+
 mode = st.sidebar.radio("Mode:", ["Initial Dose", "Trough-Only", "Peak & Trough"])
 
 st.sidebar.header("Therapeutic Target")
 target_level = st.sidebar.selectbox(
     "Select target:",
-    ["Empirical (AUC24 400-600; trough 10-15)", "Definitive (AUC24 600-800; trough 15-20)"]
+    ["Empirical (AUC24 400-600; trough 10-15)",
+     "Definitive (AUC24 600-800; trough 15-20)"]
 )
 if "Empirical" in target_level:
     target_trough = 12.5
