@@ -362,7 +362,7 @@ if not libraries_loaded:
     st.stop()
 
 # Main App Title
-st.title("🧪 Vancomycin TDM with RAG Interpretation")
+st.title("🧪 TDM-AID by HTAR (Vancomycin Module)")
 st.markdown("Calculates PK parameters and provides interpretation based on Clinical Pharmacokinetics Pharmacy Handbook (2nd edition)")
 
 if qa_chain is None:
@@ -553,7 +553,7 @@ elif mode == "Trough-Only":
                     else:
                         st.error("Could not calculate Ke. Cannot proceed with AUC/New Dose calculation.")
 
-                    st.subheader("💬 RAG Interpretation & Recommendation")
+                    st.subheader("💬 Interpretation & Recommendation")
                     st.markdown(interpretation_text)
 
                     if ke_calc > 0 and vd_calc > 0:
