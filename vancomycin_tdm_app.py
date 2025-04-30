@@ -702,4 +702,4 @@ elif mode == "Peak & Trough":
                             'Individual AUC24 (for current interval)': f"{auc24_ind:.1f} mg·h/L", # Clarified
                             'Suggested New Dose (for target AUC)': new_dose_suggestion
                         }
-                        interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_not
+                        interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes)
