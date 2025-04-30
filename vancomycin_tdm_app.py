@@ -7,9 +7,11 @@ Uses Streamlit secrets for OpenAI API key.
 Peak/Trough Vd and Expected Levels updated based on provided formulas.
 Increased LLM max_tokens and refined LLM prompt for better recommendations.
 V2: Refined LLM prompt in interpret() to explicitly compare levels/AUC to targets.
+V3: Added code-based target status checks (Trough/AUC vs. Target) displayed before LLM interpretation.
 """
 import os
 import math
+import re # Import regex for parsing target strings
 import streamlit as st
 from datetime import datetime, timedelta, time
 import logging # Added for better error logging
@@ -195,12 +197,11 @@ def calculate_initial_dose(age: int, weight: float, scr_mgdl: float, female: boo
 def calculate_individual_vd(dose: float, weight: float, cmax: float, ke: float, interval_h: float) -> float:
     """
     Calculates individual Volume of Distribution (Vd) using the formula:
-    Vd = Dose (mg) / [BW × Cmax × (1−e−KeT)]
-
-    Returns Vd in L (not L/kg)
+    Vd(L) = Dose(mg) / [ Cmax(mg/L) * (1 - exp(-Ke*T)) ]
+    (Derived from image formula assuming it calculates absolute Vd)
     """
-    if dose <= 0 or weight <= 0 or cmax <= 0 or ke <= 0 or interval_h <= 0:
-        logging.warning(f"Invalid inputs for individual Vd calculation: dose={dose}, weight={weight}, cmax={cmax}, ke={ke}, interval={interval_h}. Returning 0.")
+    if dose <= 0 or cmax <= 0 or ke <= 0 or interval_h <= 0:
+        logging.warning(f"Invalid inputs for individual Vd calculation: dose={dose}, cmax={cmax}, ke={ke}, interval={interval_h}. Returning 0.")
         return 0.0
 
     try:
@@ -209,20 +210,12 @@ def calculate_individual_vd(dose: float, weight: float, cmax: float, ke: float, 
             logging.warning(f"Exponential term invalid ({term_exp}) in individual Vd calculation. Returning 0.")
             return 0.0
 
-        # Calculate Vd in L/kg first as per formula structure
-        # Note: The formula provided in the image seems to calculate Vd in L/kg.
-        # Vd(L/kg) = Dose(mg) / [BW(kg) * Cmax(mg/L) * (1 - exp(-Ke*T))]
-        # To get absolute Vd (L), we multiply by BW(kg).
-        # Absolute Vd(L) = [ Dose(mg) / (BW(kg) * Cmax(mg/L) * (1 - exp(-Ke*T))) ] * BW(kg)
-        # Absolute Vd(L) = Dose(mg) / [ Cmax(mg/L) * (1 - exp(-Ke*T)) ]
-        # Let's recalculate based on this simplification for absolute Vd.
-
         vd_absolute = dose / (cmax * term_exp)
 
         logging.info(f"Calculated individual Vd (absolute): {vd_absolute:.1f} L")
         return vd_absolute
     except (ValueError, OverflowError, ZeroDivisionError) as e:
-        logging.error(f"Math error calculating individual Vd: {e}. Inputs: dose={dose}, weight={weight}, cmax={cmax}, ke={ke}, interval={interval_h}")
+        logging.error(f"Math error calculating individual Vd: {e}. Inputs: dose={dose}, cmax={cmax}, ke={ke}, interval={interval_h}")
         return 0.0
 
 def calculate_ke_trough(dose_int: float, vd: float, trough: float, time_since_last_dose_h: float) -> float:
@@ -234,19 +227,11 @@ def calculate_ke_trough(dose_int: float, vd: float, trough: float, time_since_la
         logging.warning(f"Invalid input for Ke calculation: trough={trough}, vd={vd}, time_since_dose={time_since_last_dose_h}. Returning Ke=0.")
         return 0
     try:
-        # Estimate Cmax assuming dose is fully distributed instantly (approximation)
-        # C(t) = C0 * exp(-ke*t) -> trough = Cmax_est * exp(-ke*time_since_last_dose)
-        # Cmax_est = trough / exp(-ke*time_since_last_dose) -> This requires Ke, which we are calculating.
-        # Alternative: Use the rise from trough: Cmax_est = trough + (dose / Vd)
+        # Estimate Cmax using rise from trough: Cmax_est = trough + (dose / Vd)
         cmax_est = trough + (dose_int / vd)
         if cmax_est <= trough:
              logging.warning(f"Calculated Cmax_est ({cmax_est:.2f}) not greater than trough ({trough:.2f}). Check inputs (Vd might be too large or dose too small). Returning Ke=0.")
              return 0
-        # Now use C(t) = C0 * exp(-ke*t) where C(t) is trough, C0 is Cmax_est, t is time_since_last_dose_h
-        # trough = cmax_est * exp(-ke * time_since_last_dose_h)
-        # trough / cmax_est = exp(-ke * time_since_last_dose_h)
-        # ln(trough / cmax_est) = -ke * time_since_last_dose_h
-        # ke = -ln(trough / cmax_est) / time_since_last_dose_h
         # ke = ln(cmax_est / trough) / time_since_last_dose_h
         ke = math.log(cmax_est / trough) / time_since_last_dose_h
         logging.info(f"Calculated Ke (trough-only): Cmax_est={cmax_est:.2f}, Trough={trough:.2f}, TimeSinceDose={time_since_last_dose_h:.2f}h => Ke={ke:.4f} h⁻¹")
@@ -301,11 +286,7 @@ def calculate_new_dose_trough(ke: float, vd: float, current_interval_h: float, t
     """
     Calculates a new dose to reach a target trough level, using the calculated Ke
     and the CURRENT dosing interval (as the default interval for the new dose).
-    Uses the formula: New dose = (Cmin target × V(L) × (1−e−KeT)) / e−KeT
-    This is equivalent to: New Dose = Cmin_target * Vd * Ke * T / (1 - exp(-Ke*T)) -> NO, this is wrong.
-    Let's re-derive from steady state equations:
-    Cmin_ss = [Dose / Vd] * [exp(-Ke*T) / (1 - exp(-Ke*T))]
-    Dose = Cmin_ss * Vd * (1 - exp(-Ke*T)) / exp(-Ke*T)
+    Uses the formula: Dose = Cmin_target * Vd * (1 - exp(-Ke*T)) / exp(-Ke*T)
     """
     if ke <= 0 or vd <= 0 or current_interval_h <= 0 or target_trough <= 0:
         logging.warning(f"Cannot calculate new dose due to invalid Ke ({ke:.4f}) or other inputs (Vd={vd:.1f}, CurrentInterval={current_interval_h:.1f}, Target={target_trough:.1f}). Returning 0.")
@@ -315,35 +296,9 @@ def calculate_new_dose_trough(ke: float, vd: float, current_interval_h: float, t
         if term_exp == 1: # Avoid division by zero if Ke or T is effectively 0
             logging.warning("Exponential term denominator is 1 (exp(-KeT)=1) in new dose calculation (Ke or interval near zero). Cannot calculate dose.")
             return 0
-        if term_exp == 0: # Avoid division by zero if Ke*T is very large
-             logging.warning("Denominator exp(-KeT) is zero in new dose calculation. Check Ke and interval.")
-             # This implies Cmin target would also be zero, dose should be zero? Or handle differently?
-             # If target is non-zero, this case implies infinite dose needed, which is wrong.
-             # Let's stick to the original formula which seems more robust:
-             # New dose = Cmax_target * Vd * (1 - exp(-Ke*T))
-             # Cmax_target = Cmin_target / exp(-Ke*T)
-             # New dose = (Cmin_target / exp(-Ke*T)) * Vd * (1 - exp(-Ke*T))
-             # New dose = Cmin_target * Vd * (1 - exp(-Ke*T)) / exp(-Ke*T)
-             # This matches the formula used before. Let's check the zero case again.
-             # If exp(-KeT) -> 0, then 1-exp(-KeT) -> 1. Dose -> Cmin_target * Vd / 0 -> Infinity.
-             # This suggests the formula might be unstable for very large Ke*T.
-             # Let's use the AUC approach: Target Dose = Target AUC_interval * CL
-             # Target AUC_interval = Target AUC24 * (current_interval_h / 24)
-             # CL = Ke * Vd
-             # Target Dose = Target AUC24 * (current_interval_h / 24) * Ke * Vd
-             # This requires a Target AUC. How to get Target AUC from Target Trough?
-             # AUC_interval = Dose / CL = Dose / (Ke * Vd)
-             # Cmin_ss = Cmax_ss * exp(-Ke*T)
-             # Cmax_ss = (Dose / Vd) / (1 - exp(-Ke*T))
-             # Cmin_ss = [(Dose / Vd) / (1 - exp(-Ke*T))] * exp(-Ke*T)
-             # Cmin_ss = (Dose / Vd) * exp(-Ke*T) / (1 - exp(-Ke*T))
-             # Dose = Cmin_ss * Vd * (1 - exp(-Ke*T)) / exp(-Ke*T) -> Back to original formula.
-
-             # Let's trust the original formula implementation and ensure checks are robust.
-             logging.warning("Denominator exp(-KeT) near zero in new dose calculation. Check Ke and interval. Result may be inaccurate/infinite.")
-             # Consider returning 0 or a very large capped value if exp(-KeT) is truly negligible.
-             # For now, let the ZeroDivisionError be caught.
-             return 0 # Return 0 if denominator is zero
+        if term_exp <= 1e-9: # Consider denominator effectively zero if exp(-KeT) is very small
+             logging.warning(f"Denominator exp(-KeT) ({term_exp:.2e}) near zero in new dose calculation. Check Ke and interval. Returning 0.")
+             return 0 # Return 0 as dose would approach infinity
 
         numerator = target_trough * vd * (1 - term_exp)
         denominator = term_exp
@@ -351,6 +306,7 @@ def calculate_new_dose_trough(ke: float, vd: float, current_interval_h: float, t
         logging.info(f"Calculated new dose (trough-target): Target={target_trough:.1f}, Vd={vd:.1f}, Ke={ke:.4f}, CurrentInterval={current_interval_h:.1f}h => Raw New Dose={new_dose:.1f}")
         return round_dose(new_dose)
     except (ValueError, OverflowError, ZeroDivisionError) as e:
+        # Catch ZeroDivisionError explicitly if the check above fails somehow
         logging.error(f"Math error calculating new dose (trough-target): {e}. Inputs: target={target_trough}, vd={vd}, ke={ke}, current_interval={current_interval_h}")
         return 0
 
@@ -391,15 +347,12 @@ def calculate_pk_params_peak_trough(
     """
     # Time between the peak draw time and the trough draw time (assuming trough is pre-next dose)
     time_between_peak_draw_and_trough_draw_h = current_interval_h - infusion_duration_h - time_from_infusion_end_to_peak_draw_h
-    # Adjust if trough is drawn earlier than pre-next dose (less common for S-Z)
-    # For standard S-Z, trough is assumed pre-dose, so this calculation is correct.
 
     if time_between_peak_draw_and_trough_draw_h <= 0 or c_peak_measured <= 0 or c_trough <= 0 or c_peak_measured <= c_trough:
         logging.warning(f"Invalid inputs for peak/trough calculation: TimeBetweenSamples={time_between_peak_draw_and_trough_draw_h:.2f}, Cpeak={c_peak_measured:.2f}, Ctrough={c_trough:.2f}.")
         return None
     try:
         # Calculate Ke using the two measured concentrations
-        # C_trough = C_peak_measured * exp(-Ke * time_between_peak_draw_and_trough_draw_h)
         ke = math.log(c_peak_measured / c_trough) / time_between_peak_draw_and_trough_draw_h
         if ke <= 0:
              logging.warning(f"Calculated Ke is zero or negative ({ke:.4f}) in peak/trough method.")
@@ -407,12 +360,11 @@ def calculate_pk_params_peak_trough(
         # Calculate t1/2
         half_life_h = math.log(2) / ke
         # Calculate Cmax extrapolated to end of infusion
-        # C_peak_measured = C_max_extrapolated * exp(-Ke * time_from_infusion_end_to_peak_draw_h)
         c_max_extrapolated = c_peak_measured * math.exp(ke * time_from_infusion_end_to_peak_draw_h)
         # Use measured trough as actual Cmin (pre-dose)
         c_min_actual = c_trough
 
-        # Calculate individual Vd using the image formula (e) - simplified version for absolute Vd
+        # Calculate individual Vd using the simplified absolute Vd formula
         # Vd(L) = Dose(mg) / [ Cmax_extrapolated(mg/L) * (1 - exp(-Ke*T)) ]
         term_exp_vd = 1 - math.exp(-ke * current_interval_h)
         if term_exp_vd <= 0 or c_max_extrapolated <= 0:
@@ -423,8 +375,7 @@ def calculate_pk_params_peak_trough(
             logging.warning("Individual Vd calculation failed or resulted in non-positive value. Cannot proceed.")
             return None
 
-        # AUC calculation using Dose/CL method (more standard for steady state)
-        # CL = Ke * Vd_ind
+        # AUC calculation using Dose/CL method
         cl_ind = ke * vd_ind
         if cl_ind <= 0:
              logging.warning(f"Calculated individual CL is zero or negative (Ke={ke:.4f}, Vd_ind={vd_ind:.1f}). Cannot calculate AUC.")
@@ -432,7 +383,7 @@ def calculate_pk_params_peak_trough(
         auc_interval_total = dose / cl_ind
         auc24 = auc_interval_total * (24 / current_interval_h)
 
-        # Calculate expected levels for the *current* dose using image formulas (f, g) and calculated individual Vd
+        # Calculate expected levels for the *current* dose using calculated individual Vd
         expected_cmax = calculate_expected_cmax(dose, vd_ind, current_interval_h, ke)
         expected_cmin = calculate_expected_cmin(expected_cmax, ke, current_interval_h)
 
@@ -453,7 +404,7 @@ def calculate_pk_params_peak_trough(
         logging.error(f"Math error calculating PK parameters (peak/trough): {e}.")
         return None
 
-# --- 8. LLM INTERPRETATION (Refined Prompt V2) ---
+# --- 8. LLM INTERPRETATION (Refined Prompt V2 - Keep as is for now) ---
 def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_notes: str) -> str:
     """Generates interpretation and recommendations using the RAG chain, including clinical notes."""
     if qa_chain is None:
@@ -468,6 +419,8 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     calculated_thalf = pk_results.get('Estimated t½', pk_results.get('t_half', 'N/A')) # Get t_half from either mode
     expected_cmax = pk_results.get('Expected_Cmax', 'N/A')
     expected_cmin = pk_results.get('Expected_Cmin', 'N/A')
+    trough_status = pk_results.get('Trough Status vs Target', 'N/A') # Get code-checked status
+    auc_status = pk_results.get('AUC Status vs Target', 'N/A') # Get code-checked status
 
 
     # Format values for prompt, handling N/A
@@ -481,6 +434,9 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     notes_context = f"\n\nClinical Notes Provided:\n{clinical_notes}" if clinical_notes else ""
     half_life_info = f"Calculated half-life is {calculated_thalf_str}." if calculated_thalf_str != 'N/A' else ""
 
+    # Add the objective status check result to the context for the LLM
+    objective_status_context = f"\nObjective Status Check:\n- Trough Status: {trough_status}\n- AUC Status: {auc_status}\n"
+
     prompt = f"""
 Context: You are a clinical pharmacokinetics expert interpreting vancomycin TDM results based on the Clinical Pharmacokinetics Pharmacy Handbook, 2nd edition.
 
@@ -491,20 +447,20 @@ Patient Information Summary:
 
 Current Regimen & Monitoring Results:
 {pk_results}
-
-Task: Provide a concise, structured interpretation and recommendation, considering all provided information. Structure your response clearly under the following headings: Assessment, Recommendation, Rationale, Follow-up. Ensure your assessment statements are strictly consistent with the numerical data provided.
+{objective_status_context}
+Task: Provide a concise, structured interpretation and recommendation, considering all provided information. Structure your response clearly under the following headings: Assessment, Recommendation, Rationale, Follow-up. **Ensure your assessment statements are strictly consistent with the numerical data AND the Objective Status Check provided above.**
 
 1.  **Assessment:**
-    * **Trough Level:** Compare the Measured Trough ({measured_trough_str}) to the target trough range specified in '{target_level_desc}'. State the measured value, the target range, and explicitly whether the measured trough is BELOW, WITHIN, or ABOVE the target range. Handle 'N/A' values appropriately.
-    * **AUC Level:** Compare the Calculated AUC ({calculated_auc_str}) to the target AUC range specified in '{target_level_desc}'. State the calculated value, the target range, and explicitly whether the calculated AUC is BELOW, WITHIN, or ABOVE the target range. Handle 'N/A' values appropriately.
-    * **Overall Goal:** Based *only* on the trough and AUC comparisons above, is the overall therapeutic goal currently being met?
+    * **Trough Level:** State the Measured Trough ({measured_trough_str}), the target trough range from '{target_level_desc}', and the objective status ({trough_status}).
+    * **AUC Level:** State the Calculated AUC ({calculated_auc_str}), the target AUC range from '{target_level_desc}', and the objective status ({auc_status}).
+    * **Overall Goal:** Based *only* on the objective status check, is the overall therapeutic goal currently being met?
     * **Clearance:** Is the patient clearing the drug as expected based on CrCl? {time_context}
     * **Interval Appropriateness:** Is the current dosing interval ({current_interval_info}) appropriate given the calculated half-life ({half_life_info})?
     * **Clinical Alignment:** Does the clinical picture (from notes, if provided) align with the levels? (e.g., therapeutic levels but ongoing fever?)
     * **Expected vs. Measured:** If available, compare measured levels (Trough: {measured_trough_str}) to the 'Expected_Cmin' ({expected_cmin_str}) calculated for the current regimen. Are they similar or significantly different? (Also consider Cmax if applicable: Measured Peak/Extrapolated vs Expected Cmax {expected_cmax_str}).
 
 2.  **Recommendation:**
-    * Clearly state whether a dose/interval change is needed based on the Assessment.
+    * Clearly state whether a dose/interval change is needed based on the Assessment (especially the objective status).
     * If adjustment is needed:
         * Suggest a specific dose (rounded to nearest 250mg) AND a standard clinical interval (e.g., q8h, q12h, q24h). Reference the 'Suggested New Dose' field from the results if available and appropriate.
         * Prioritize maintaining the current interval unless the half-life or clinical context strongly suggests a change. If changing the interval, explain why.
@@ -513,14 +469,14 @@ Task: Provide a concise, structured interpretation and recommendation, consideri
 
 3.  **Rationale:**
     * Explain *why* the recommendation is being made.
-    * Link the decision directly to the specific findings in the Assessment (levels vs. target, AUC vs. target, Ke, Vd, CrCl, half-life vs. interval, clinical notes). Be specific about which parameters justify the recommendation.
+    * Link the decision directly to the specific findings in the Assessment (objective status, levels vs. target, AUC vs. target, Ke, Vd, CrCl, half-life vs. interval, clinical notes). Be specific about which parameters justify the recommendation.
 
 4.  **Follow-up:**
     * Suggest *specific* monitoring. When should the next level be drawn (e.g., trough before 3rd/4th dose of new regimen)?
     * Should renal function (SCr) be monitored more frequently?
     * Mention any other relevant clinical monitoring based on the notes.
 
-Use the provided guideline knowledge. Be specific and clinically oriented. Ensure the response is complete and directly supported by the provided data.
+Use the provided guideline knowledge. Be specific and clinically oriented. Ensure the response is complete and directly supported by the provided data and objective status check.
 """
     logging.info(f"Generating interpretation with prompt:\n{prompt}")
     try:
@@ -549,8 +505,66 @@ Use the provided guideline knowledge. Be specific and clinically oriented. Ensur
         logging.exception("RAG Chain execution error:")
         return f"Interpretation failed: Error communicating with the RAG system ({e}). Check API key and model availability."
 
+# --- 9. HELPER FUNCTION for Target Status Check ---
+def get_target_ranges(target_desc: str) -> tuple[tuple[float|None, float|None], tuple[float|None, float|None]]:
+    """Parses the target description string to get numerical trough and AUC ranges."""
+    trough_range = (None, None)
+    auc_range = (None, None)
 
-# --- 9. STREAMLIT UI ---
+    # Extract Trough range (e.g., ~10-15 mg/L or ~15-20 mg/L)
+    trough_match = re.search(r'Trough\s*~\s*([\d.]+)\s*-\s*([\d.]+)', target_desc)
+    if trough_match:
+        try:
+            trough_range = (float(trough_match.group(1)), float(trough_match.group(2)))
+        except ValueError:
+            logging.warning(f"Could not parse trough range from: {trough_match.group(0)}")
+
+    # Extract AUC range (e.g., 400-600 mg·h/L or >600 mg·h/L)
+    auc_match_range = re.search(r'AUC24\s*([\d.]+)\s*-\s*([\d.]+)', target_desc)
+    auc_match_greater = re.search(r'AUC24\s*>\s*([\d.]+)', target_desc)
+
+    if auc_match_range:
+        try:
+            auc_range = (float(auc_match_range.group(1)), float(auc_match_range.group(2)))
+        except ValueError:
+            logging.warning(f"Could not parse AUC range from: {auc_match_range.group(0)}")
+    elif auc_match_greater:
+        try:
+            # Represent ">X" as (X, infinity) - use None for infinity
+            auc_range = (float(auc_match_greater.group(1)), None)
+        except ValueError:
+            logging.warning(f"Could not parse AUC lower bound from: {auc_match_greater.group(0)}")
+
+    return trough_range, auc_range
+
+def check_target_status(value: float | None, target_range: tuple[float|None, float|None]) -> str:
+    """Compares a value against a target range tuple (min, max). Handles None for infinity."""
+    if value is None or value <= 0:
+        return "N/A (Invalid Value)"
+    if target_range == (None, None):
+        return "N/A (Invalid Target)"
+
+    lower_bound, upper_bound = target_range
+
+    if lower_bound is not None and upper_bound is not None: # Range like 10-15 or 400-600
+        if value < lower_bound:
+            return f"BELOW ({lower_bound}-{upper_bound})"
+        elif value > upper_bound:
+            return f"ABOVE ({lower_bound}-{upper_bound})"
+        else:
+            return f"WITHIN ({lower_bound}-{upper_bound})"
+    elif lower_bound is not None and upper_bound is None: # Range like >600
+        # Add a small tolerance for floating point comparisons, e.g., 600.01 is considered WITHIN
+        tolerance = 1e-6
+        if value <= lower_bound - tolerance:
+             return f"BELOW (>{lower_bound})"
+        else: # value > lower_bound
+             return f"WITHIN (>{lower_bound})"
+    # Add cases for <X or other range types if needed
+    else:
+        return "N/A (Unhandled Target Format)"
+
+# --- 10. STREAMLIT UI ---
 
 # Display initial errors if setup failed
 if not api_key_loaded:
@@ -577,23 +591,24 @@ target_level_desc = st.sidebar.selectbox(
         "Empirical (Target AUC24 400-600 mg·h/L; Trough ~10-15 mg/L)",
         "Definitive/Severe (Target AUC24 >600 mg·h/L; Trough ~15-20 mg/L)"
     ],
-    index=0,
+    index=0, # Default to Empirical
     help="Select the desired therapeutic goal based on infection type and severity."
 )
 
 # Determine numerical targets for calculations based on selection
-target_trough_for_calc = 0.0
-target_auc_range = "N/A"
-target_auc_numeric_for_calc = 0.0 # For dose calculation
+target_trough_range_calc, target_auc_range_calc = get_target_ranges(target_level_desc)
+
+# Define the single value to *target* for dose calculation (e.g., midpoint or lower bound)
+target_trough_for_dose_calc = 0.0
+target_auc_for_dose_calc = 0.0
 
 if "Empirical" in target_level_desc:
-    target_trough_for_calc = 12.5 # Midpoint of 10-15
-    target_auc_range = "400-600"
-    target_auc_numeric_for_calc = 500 # Midpoint target for dose calc
+    target_trough_for_dose_calc = 12.5 # Midpoint of 10-15
+    target_auc_for_dose_calc = 500 # Midpoint target for dose calc
 elif "Definitive/Severe" in target_level_desc:
-    target_trough_for_calc = 17.5 # Midpoint of 15-20
-    target_auc_range = ">600"
-    target_auc_numeric_for_calc = 600 # Lower end target for dose calc
+    target_trough_for_dose_calc = 17.5 # Midpoint of 15-20
+    target_auc_for_dose_calc = 600 # Lower end target for dose calc
+
 
 st.sidebar.header("👤 Patient Information")
 col_pid, col_ward = st.sidebar.columns(2)
@@ -650,7 +665,23 @@ def build_report(lines: list[str], scr_umol_report: float, clinical_notes_report
             clinical_notes_report.replace('\n', '\n  ') # Indent notes slightly
         ])
     hdr.append("--- Results & Interpretation ---")
-    return "\n".join(hdr + lines)
+    # Use a more robust way to format lines from dict for report
+    report_body = []
+    for k, v in lines.items(): # Assuming lines is now the pk_results dict
+         report_body.append(f"{k}: {v}")
+
+    # Find interpretation if it exists and add it formatted
+    interpretation_key = "RAG Interpretation"
+    interpretation_content = lines.get(interpretation_key, None)
+    if interpretation_content:
+         report_body.append(f"--- {interpretation_key} ---")
+         report_body.append(interpretation_content.replace('\n', '\n  '))
+         # Remove it from the main list if it was added separately
+         if interpretation_key in lines:
+             # This part might need adjustment depending on how interpretation is added
+             pass # Logic to avoid duplication if needed
+
+    return "\n".join(hdr + report_body)
 
 # --- Main Area Logic ---
 results_container = st.container()
@@ -674,11 +705,11 @@ if mode == "Initial Dose":
                     st.metric(label="Estimated CrCl", value=f"{crcl_calc:.1f} mL/min")
                     st.success(f"Recommended Initial Loading Dose: **{initial_dose_mg} mg** (Administer once)")
 
-                    report_lines = [
-                        f"Mode: Initial Loading Dose",
-                        f"Calculated Loading Dose: {initial_dose_mg} mg (one time)"
-                    ]
-                    report_data = build_report(report_lines, scr_umol, clinical_notes)
+                    report_dict = { # Use dict for report
+                        "Mode": "Initial Loading Dose",
+                        "Calculated Loading Dose": f"{initial_dose_mg} mg (one time)"
+                    }
+                    report_data = build_report(report_dict, scr_umol, clinical_notes)
                     st.download_button(
                         label="📥 Download Report (.txt)",
                         data=report_data,
@@ -726,13 +757,20 @@ elif mode == "Trough-Only":
                      new_dose_calc = 0 # Initialize
                      auc24_calc = 0.0 # Initialize
                      t_half_calc = 0.0 # Initialize
+                     trough_status = "N/A" # Initialize
+                     auc_status = "N/A" # Initialize
 
 
                      if ke_calc > 0 and vd_calc > 0:
                          t_half_calc = math.log(2) / ke_calc
                          auc24_calc = calculate_auc24_trough(dose_int_current, ke_calc, vd_calc, current_interval_h)
                          # Calculate new dose targeting the midpoint trough for the selected range
-                         new_dose_calc = calculate_new_dose_trough(ke_calc, vd_calc, current_interval_h, target_trough=target_trough_for_calc)
+                         new_dose_calc = calculate_new_dose_trough(ke_calc, vd_calc, current_interval_h, target_trough=target_trough_for_dose_calc)
+
+                         # --- Perform Status Check ---
+                         trough_status = check_target_status(trough_measured, target_trough_range_calc)
+                         auc_status = check_target_status(auc24_calc, target_auc_range_calc)
+                         # --- End Status Check ---
 
                          st.metric(label="Estimated CrCl", value=f"{crcl_calc:.1f} mL/min")
                          col1, col2, col3 = st.columns(3)
@@ -740,8 +778,8 @@ elif mode == "Trough-Only":
                          col1.metric(label="Est. Population Vd", value=f"{vd_calc:.1f} L")
                          col2.metric(label="Estimated Ke", value=f"{ke_calc:.4f} h⁻¹")
                          col3.metric(label="Estimated t½", value=f"{t_half_calc:.1f} h")
-                         st.metric(label=f"Estimated AUC₂₄ (based on q{current_interval_h}h)", value=f"{auc24_calc:.1f} mg·h/L", help=f"Target: {target_auc_range} mg·h/L")
-                         st.metric(label=f"Suggested New Dose (for target ~{target_trough_for_calc} mg/L)", value=f"{new_dose_calc} mg q{current_interval_h}h" if new_dose_calc > 0 else "N/A", help=f"Rounded dose for the current q{current_interval_h}h interval to achieve target trough.")
+                         st.metric(label=f"Estimated AUC₂₄ (based on q{current_interval_h}h)", value=f"{auc24_calc:.1f} mg·h/L", help=f"Target: {target_level_desc.split(';')[0]}") # Show AUC target part
+                         st.metric(label=f"Suggested New Dose (for target ~{target_trough_for_dose_calc} mg/L)", value=f"{new_dose_calc} mg q{current_interval_h}h" if new_dose_calc > 0 else "N/A", help=f"Rounded dose for the current q{current_interval_h}h interval to achieve target trough.")
 
                          pk_results = {
                              'Calculation Mode': 'Trough-Only',
@@ -749,10 +787,12 @@ elif mode == "Trough-Only":
                              'Current Dosing Interval': f"q{current_interval_h}h",
                              'Time Since Last Dose (at Trough Draw)': f"{time_since_last_dose_h:.2f} h",
                              'Measured Trough': f"{trough_measured:.1f} mg/L",
-                             'Estimated Population Vd': f"{vd_calc:.1f} L", # Clarified Vd type
+                             'Trough Status vs Target': trough_status, # Add status
+                             'Estimated Population Vd': f"{vd_calc:.1f} L",
                              'Estimated Ke': f"{ke_calc:.4f} h⁻¹",
                              'Estimated t½': f"{t_half_calc:.1f} h",
                              'Estimated AUC24 (for current interval)': f"{auc24_calc:.1f} mg·h/L",
+                             'AUC Status vs Target': auc_status, # Add status
                              'Suggested New Dose (for target trough)': f"{new_dose_calc} mg q{current_interval_h}h" if new_dose_calc > 0 else "N/A"
                          }
                          # Only run interpretation if RAG chain loaded
@@ -769,32 +809,41 @@ elif mode == "Trough-Only":
                              'Current Dosing Interval': f"q{current_interval_h}h",
                              'Time Since Last Dose (at Trough Draw)': f"{time_since_last_dose_h:.2f} h",
                              'Measured Trough': f"{trough_measured:.1f} mg/L",
+                             'Trough Status vs Target': check_target_status(trough_measured, target_trough_range_calc), # Still check trough
                              'Error': 'Failed to calculate valid Ke/Vd from trough level.',
                              'Estimated Population Vd': f"{vd_calc:.1f} L" if vd_calc > 0 else "N/A",
                              'Estimated Ke': "Invalid",
                              'Estimated t½': "N/A",
                              'Estimated AUC24': "N/A",
+                             'AUC Status vs Target': "N/A (Calculation Failed)",
                              'Suggested New Dose': "N/A"
                          }
+                         interpretation_text = "Interpretation unavailable due to calculation error."
 
 
-                     st.subheader("💬 Interpretation & Recommendation")
+                     # --- Display Status Check before Interpretation ---
+                     st.divider() # Add visual separation
+                     st.subheader("🎯 Target Status Check (Code-Based)")
+                     if 'Error' not in pk_results:
+                         st.markdown(f" - **Measured Trough:** {trough_measured:.1f} mg/L -> **{trough_status}**")
+                         st.markdown(f" - **Estimated AUC₂₄:** {auc24_calc:.1f} mg·h/L -> **{auc_status}**")
+                     else:
+                         # Show status even if calc failed partially
+                         st.markdown(f" - **Measured Trough:** {trough_measured:.1f} mg/L -> **{pk_results.get('Trough Status vs Target','N/A')}**")
+                         st.markdown(f" - **Estimated AUC₂₄:** N/A -> **{pk_results.get('AUC Status vs Target','N/A')}**")
+                         st.warning("Status based on available data; AUC calculation failed.")
+                     st.divider()
+                     # --- End Display Status Check ---
+
+                     st.subheader("💬 Interpretation & Recommendation (AI-Generated)")
                      st.markdown(interpretation_text) # Display interpretation or error message
 
-                     # Allow download even if calculation failed partially, showing the error
-                     report_lines = [f"{k}: {v}" for k, v in pk_results.items()]
-                     # Add interpretation to report if available
-                     if interpretation_text != "N/A (Calculation Error or RAG disabled)" and interpretation_text != "Interpretation disabled: RAG system not loaded.":
-                          report_lines.extend([
-                               f"--- RAG Interpretation ---",
-                               interpretation_text.replace('\n', '\n  ')
-                          ])
-                     elif 'Error' in pk_results: # Add error message if interpretation failed
-                          report_lines.append(f"--- Interpretation Status ---")
-                          report_lines.append(pk_results['Error'])
+                     # Prepare dict for report
+                     report_dict = pk_results.copy()
+                     if interpretation_text not in ["N/A (Calculation Error or RAG disabled)", "Interpretation disabled: RAG system not loaded.", "Interpretation unavailable due to calculation error."]:
+                         report_dict["RAG Interpretation"] = interpretation_text
 
-
-                     report_data = build_report(report_lines, scr_umol, clinical_notes)
+                     report_data = build_report(report_dict, scr_umol, clinical_notes)
                      st.download_button(
                          label="📥 Download Report (.txt)",
                          data=report_data,
@@ -824,8 +873,6 @@ elif mode == "Peak & Trough":
 
         infusion_duration_h = hours_diff(infusion_start_time, infusion_end_time)
         time_from_infusion_end_to_peak_draw_h = hours_diff(infusion_end_time, peak_sample_time)
-        # Optional: Calculate time from peak draw to trough draw
-        # time_peak_to_trough = hours_diff(peak_sample_time, trough_sample_time)
 
         valid_times = True
         if infusion_duration_h <= 0:
@@ -837,11 +884,9 @@ elif mode == "Peak & Trough":
 
         if valid_times:
              st.info(f"Calculated Durations: Infusion={infusion_duration_h:.2f}h | Delay to Peak Draw={time_from_infusion_end_to_peak_draw_h:.2f}h. Current Interval: **q{current_interval_h_pt}h**.")
-             # Check if interval allows for sampling times (basic check)
              time_between_peak_draw_and_trough_draw_h_check = current_interval_h_pt - infusion_duration_h - time_from_infusion_end_to_peak_draw_h
              if time_between_peak_draw_and_trough_draw_h_check <= 0:
                   st.warning("Timing Error: The interval is too short for the specified infusion and peak draw times. Ke calculation will likely fail.")
-                  # valid_times = False # Allow calculation attempt, but warn user
 
         calc_button = st.button("Run Peak & Trough Analysis", key="run_peak_trough")
 
@@ -872,21 +917,27 @@ elif mode == "Peak & Trough":
                     interpretation_text = "N/A (Calculation Error or RAG disabled)"
                     pk_results = {"Error": "Failed to calculate PK parameters from Peak & Trough data."}
                     new_dose_suggestion = "N/A" # Initialize
+                    trough_status = "N/A" # Initialize
+                    auc_status = "N/A" # Initialize
 
                     if pk_params:
                         ke_ind = pk_params['ke']
                         thalf_ind = pk_params['t_half']
                         cmax_ind = pk_params['Cmax_extrapolated']
-                        cmin_ind = pk_params['Cmin_actual']
+                        cmin_ind = pk_params['Cmin_actual'] # This is the measured trough
                         auc24_ind = pk_params['AUC24']
                         vd_ind = pk_params['Vd_individual']
                         cl_ind = pk_params['CL_individual']
                         exp_cmax_ind = pk_params['Expected_Cmax']
                         exp_cmin_ind = pk_params['Expected_Cmin']
 
+                        # --- Perform Status Check ---
+                        trough_status = check_target_status(cmin_ind, target_trough_range_calc)
+                        auc_status = check_target_status(auc24_ind, target_auc_range_calc)
+                        # --- End Status Check ---
+
                         st.metric(label="Estimated CrCl", value=f"{crcl_calc:.1f} mL/min")
                         col1, col2, col3 = st.columns(3)
-                        # Display individual Vd calculated using formula (e)
                         col1.metric(label="Individual Vd", value=f"{vd_ind:.1f} L" if vd_ind > 0 else "N/A", help="Calculated using Dose / [Cmax_extrap × (1−e−KeT)]")
                         col2.metric(label="Individual Ke", value=f"{ke_ind:.4f} h⁻¹")
                         col3.metric(label="Individual t½", value=f"{thalf_ind:.1f} h")
@@ -895,23 +946,21 @@ elif mode == "Peak & Trough":
                         col4.metric(label="Est. Cmax (End of Infusion)", value=f"{cmax_ind:.1f} mg/L")
                         col5.metric(label="Measured Cmin (Trough)", value=f"{cmin_ind:.1f} mg/L")
 
-                        # Display Expected Cmax/Cmin
                         col6, col7 = st.columns(2)
                         col6.metric(label="Expected Cmax (for current dose)", value=f"{exp_cmax_ind:.1f} mg/L" if exp_cmax_ind > 0 else "N/A", help="Predicted Cmax based on individual Vd/Ke")
                         col7.metric(label="Expected Cmin (for current dose)", value=f"{exp_cmin_ind:.1f} mg/L" if exp_cmin_ind > 0 else "N/A", help="Predicted Cmin based on individual Vd/Ke")
 
-                        st.metric(label=f"Individual AUC₂₄ (based on q{current_interval_h_pt}h)", value=f"{auc24_ind:.1f} mg·h/L", help=f"Target: {target_auc_range} mg·h/L")
+                        st.metric(label=f"Individual AUC₂₄ (based on q{current_interval_h_pt}h)", value=f"{auc24_ind:.1f} mg·h/L", help=f"Target: {target_level_desc.split(';')[0]}") # Show AUC target part
 
                         # --- Suggested Dose Calculation using Individual Parameters ---
-                        # Target the AUC value determined earlier based on selection
-                        if ke_ind > 0 and vd_ind > 0 and current_interval_h_pt > 0 and cl_ind > 0 and target_auc_numeric_for_calc > 0:
+                        if ke_ind > 0 and vd_ind > 0 and current_interval_h_pt > 0 and cl_ind > 0 and target_auc_for_dose_calc > 0:
                              try:
                                  # Target Dose = Target AUC_interval * CL_ind
-                                 target_auc_interval = target_auc_numeric_for_calc * (current_interval_h_pt / 24.0)
+                                 target_auc_interval = target_auc_for_dose_calc * (current_interval_h_pt / 24.0)
                                  new_dose_raw = target_auc_interval * cl_ind
                                  new_dose_rounded = round_dose(new_dose_raw)
                                  new_dose_suggestion = f"{new_dose_rounded} mg q{current_interval_h_pt}h"
-                                 st.metric(label=f"Suggested Dose (for Target AUC ~{target_auc_numeric_for_calc})", value=new_dose_suggestion, help=f"Calculated to achieve target AUC ({target_auc_numeric_for_calc}) using individual CL and current interval.")
+                                 st.metric(label=f"Suggested Dose (for Target AUC ~{target_auc_for_dose_calc})", value=new_dose_suggestion, help=f"Calculated to achieve target AUC ({target_auc_for_dose_calc}) using individual CL and current interval.")
                              except Exception as dose_calc_err:
                                  st.warning(f"Could not calculate suggested dose: {dose_calc_err}")
                                  new_dose_suggestion = "N/A (Calculation Error)"
@@ -928,15 +977,17 @@ elif mode == "Peak & Trough":
                             'Time to Peak Draw (post-infusion)': f"{time_from_infusion_end_to_peak_draw_h:.2f} h",
                             'Measured Peak (at draw time)': f"{c_peak_measured:.1f} mg/L",
                             'Measured Trough (Cmin)': f"{c_trough_measured:.1f} mg/L",
-                            'Individual Vd (Formula e)': f"{vd_ind:.1f} L" if vd_ind > 0 else "N/A", # Specify Vd method
+                            'Trough Status vs Target': trough_status, # Add status
+                            'Individual Vd (Formula e)': f"{vd_ind:.1f} L" if vd_ind > 0 else "N/A",
                             'Individual Ke': f"{ke_ind:.4f} h⁻¹",
                             'Individual t½': f"{thalf_ind:.1f} h",
                             'Individual CL': f"{cl_ind:.2f} L/h",
                             'Est. Cmax (End of Infusion)': f"{cmax_ind:.1f} mg/L",
-                            'Expected Cmax (Formula f)': f"{exp_cmax_ind:.1f} mg/L" if exp_cmax_ind > 0 else "N/A", # Add expected
-                            'Expected Cmin (Formula g)': f"{exp_cmin_ind:.1f} mg/L" if exp_cmin_ind > 0 else "N/A", # Add expected
+                            'Expected Cmax (Formula f)': f"{exp_cmax_ind:.1f} mg/L" if exp_cmax_ind > 0 else "N/A",
+                            'Expected Cmin (Formula g)': f"{exp_cmin_ind:.1f} mg/L" if exp_cmin_ind > 0 else "N/A",
                             'AUC_interval': f"{pk_params['AUC_interval']:.1f} mg·h/L",
                             'Individual AUC24 (for current interval)': f"{auc24_ind:.1f} mg·h/L",
+                            'AUC Status vs Target': auc_status, # Add status
                             'Suggested New Dose (for target AUC)': new_dose_suggestion
                         }
                         # Only run interpretation if RAG chain loaded
@@ -952,25 +1003,34 @@ elif mode == "Peak & Trough":
                         pk_results['Current Dosing Interval'] = f"q{current_interval_h_pt}h"
                         pk_results['Measured Peak'] = f"{c_peak_measured:.1f} mg/L"
                         pk_results['Measured Trough'] = f"{c_trough_measured:.1f} mg/L"
+                        pk_results['Trough Status vs Target'] = check_target_status(c_trough_measured, target_trough_range_calc) # Still check trough
+                        pk_results['AUC Status vs Target'] = "N/A (Calculation Failed)"
+                        interpretation_text = "Interpretation unavailable due to calculation error."
 
 
-                    st.subheader("💬 Interpretation & Recommendation")
+                    # --- Display Status Check before Interpretation ---
+                    st.divider() # Add visual separation
+                    st.subheader("🎯 Target Status Check (Code-Based)")
+                    if 'Error' not in pk_results:
+                        st.markdown(f" - **Measured Trough:** {cmin_ind:.1f} mg/L -> **{trough_status}**")
+                        st.markdown(f" - **Calculated AUC₂₄:** {auc24_ind:.1f} mg·h/L -> **{auc_status}**")
+                    else:
+                        # Show status even if calc failed partially
+                        st.markdown(f" - **Measured Trough:** {c_trough_measured:.1f} mg/L -> **{pk_results.get('Trough Status vs Target','N/A')}**")
+                        st.markdown(f" - **Calculated AUC₂₄:** N/A -> **{pk_results.get('AUC Status vs Target','N/A')}**")
+                        st.warning("Status based on available data; PK parameter calculation failed.")
+                    st.divider()
+                    # --- End Display Status Check ---
+
+                    st.subheader("💬 Interpretation & Recommendation (AI-Generated)")
                     st.markdown(interpretation_text) # Display interpretation or error message
 
-                    # Allow download even if calculation failed partially
-                    report_lines = [f"{k}: {v}" for k, v in pk_results.items()]
-                    # Add interpretation to report if available
-                    if interpretation_text != "N/A (Calculation Error or RAG disabled)" and interpretation_text != "Interpretation disabled: RAG system not loaded.":
-                         report_lines.extend([
-                              f"--- RAG Interpretation ---",
-                              interpretation_text.replace('\n', '\n  ')
-                         ])
-                    elif 'Error' in pk_results: # Add error message if interpretation failed
-                         report_lines.append(f"--- Interpretation Status ---")
-                         report_lines.append(pk_results['Error'])
+                    # Prepare dict for report
+                    report_dict = pk_results.copy()
+                    if interpretation_text not in ["N/A (Calculation Error or RAG disabled)", "Interpretation disabled: RAG system not loaded.", "Interpretation unavailable due to calculation error."]:
+                        report_dict["RAG Interpretation"] = interpretation_text
 
-
-                    report_data = build_report(report_lines, scr_umol, clinical_notes)
+                    report_data = build_report(report_dict, scr_umol, clinical_notes)
                     st.download_button(
                         label="📥 Download Report (.txt)",
                         data=report_data,
@@ -982,4 +1042,5 @@ elif mode == "Peak & Trough":
 # --- Footer ---
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational and informational purposes only. Consult official guidelines and clinical judgment for patient care decisions.")
-st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App last updated: {datetime.now().strftime('%Y-%m-%d')}")
+st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App version: V3 | Last updated: {datetime.now().strftime('%Y-%m-%d')}")
+
