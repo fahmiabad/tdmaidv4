@@ -13,6 +13,8 @@ V4: Upgraded LLM to ChatOpenAI (gpt-4o) and significantly refined prompt for bet
     Added expected CL calculation based on CrCl for comparison.
 V5: Refined "Overall Goal" prompt wording for more natural language.
     Added current date context to prompt and instructed LLM to estimate follow-up level date.
+V6: Changed display format for time since last dose to "X hours Y minutes".
+    Updated pk_results and interpretation context accordingly.
 """
 import os
 import math
@@ -156,6 +158,21 @@ def hours_diff(start: time, end: time) -> float:
     if dt_end < dt_start:
         dt_end += timedelta(days=1)
     return (dt_end - dt_start).total_seconds() / 3600
+
+# --- V6: Helper to format decimal hours ---
+def format_hours_minutes(decimal_hours: float) -> str:
+    """Converts decimal hours to 'X hours Y minutes' format."""
+    if decimal_hours < 0:
+        return "Invalid time difference"
+    total_minutes = int(round(decimal_hours * 60))
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if hours > 0 and minutes > 0:
+        return f"{hours} hours {minutes} minutes"
+    elif hours > 0:
+        return f"{hours} hours"
+    else:
+        return f"{minutes} minutes"
 
 # --- 7. PK CALC FUNCTIONS ---
 
@@ -423,7 +440,8 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
 
     # Extract relevant values safely
     current_interval_info = pk_results.get('Current Dosing Interval', 'N/A')
-    time_since_dose_info = pk_results.get('Time Since Last Dose (at Trough Draw)', 'N/A') # Only for trough mode
+    # V6 Change: Use formatted time string from pk_results
+    time_since_dose_info = pk_results.get('Time Since Last Dose (at Trough Draw)', 'N/A')
     measured_trough = pk_results.get('Measured Trough', pk_results.get('Cmin_actual', 'N/A')) # Get trough from either mode
     calculated_auc = pk_results.get('Estimated AUC24', pk_results.get('AUC24', 'N/A')) # Get AUC from either mode
     calculated_thalf = pk_results.get('Estimated t½', pk_results.get('t_half', 'N/A')) # Get t_half from either mode
@@ -449,7 +467,8 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     calculated_cl_str = f"{calculated_cl:.2f} L/hr" if calculated_cl > 0 else "N/A"
     current_date_str = current_date.strftime('%Y-%m-%d') # V5 Change: Format current date
 
-    time_context = f"Consider the actual time the trough was drawn ({time_since_dose_info})." if time_since_dose_info != 'N/A' else ""
+    # V6 Change: Use the already formatted time_since_dose_info string
+    time_context = f"Trough drawn {time_since_dose_info} after the last dose." if time_since_dose_info != 'N/A' else ""
     notes_context = f"\n\nClinical Notes Provided:\n{clinical_notes}" if clinical_notes else ""
     half_life_info = f"Calculated half-life is {calculated_thalf_str}." if calculated_thalf_str != 'N/A' else "Half-life calculation failed."
 
@@ -457,6 +476,7 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     objective_status_context = f"\nObjective Status Check:\n- Trough Status: {trough_status}\n- AUC Status: {auc_status}\n"
 
     # --- V5 Change: Refined Prompt (Overall Goal, Follow-up Date) ---
+    # --- V6 Change: Updated time_context usage in prompt ---
     prompt = f"""
 Context: You are a clinical pharmacokinetics expert interpreting vancomycin TDM results based on the Clinical Pharmacokinetics Pharmacy Handbook, 2nd edition. Today's date is {current_date_str}.
 
@@ -498,7 +518,7 @@ Task: Provide a concise, structured interpretation and recommendation, consideri
 
 Use the provided guideline knowledge. Be specific and clinically oriented. Ensure the response is complete and directly supported by the provided data and objective status check.
 """
-    logging.info(f"Generating interpretation with refined prompt (V5) for model {qa_chain.llm.model_name if hasattr(qa_chain, 'llm') else 'N/A'}:\n{prompt}")
+    logging.info(f"Generating interpretation with refined prompt (V6) for model {qa_chain.llm.model_name if hasattr(qa_chain, 'llm') else 'N/A'}:\n{prompt}")
     try:
         # Use invoke for newer Langchain versions
         if hasattr(qa_chain, 'invoke'):
@@ -768,8 +788,12 @@ elif mode == "Trough-Only":
         st.markdown("Estimates PK parameters and suggests dose adjustments based on a single trough level and the **current** dosing interval.")
 
         time_since_last_dose_h = hours_diff(dose_time, sample_time)
+        # V6 Change: Format the time difference for display
+        time_since_last_dose_formatted = format_hours_minutes(time_since_last_dose_h)
+
         if time_since_last_dose_h > 0:
-            st.info(f"Trough drawn **{time_since_last_dose_h:.2f} hours** after the last dose. Current interval: **q{current_interval_h}h**.")
+            # V6 Change: Use formatted string in st.info
+            st.info(f"Trough drawn **{time_since_last_dose_formatted}** after the last dose. Current interval: **q{current_interval_h}h**.")
         else:
             st.warning("Sample time must be after the last dose time.")
 
@@ -820,11 +844,12 @@ elif mode == "Trough-Only":
                          st.metric(label=f"Estimated AUC₂₄ (based on q{current_interval_h}h)", value=f"{auc24_calc:.1f} mg·h/L", help=f"Target: {target_level_desc.split(';')[0]}") # Show AUC target part
                          st.metric(label=f"Suggested New Dose (for target ~{target_trough_for_dose_calc} mg/L)", value=f"{new_dose_calc} mg q{current_interval_h}h" if new_dose_calc > 0 else "N/A", help=f"Rounded dose for the current q{current_interval_h}h interval to achieve target trough.")
 
+                         # V6 Change: Store formatted time string in results
                          pk_results = {
                              'Calculation Mode': 'Trough-Only',
                              'Current Dose': f"{dose_int_current} mg",
                              'Current Dosing Interval': f"q{current_interval_h}h",
-                             'Time Since Last Dose (at Trough Draw)': f"{time_since_last_dose_h:.2f} h",
+                             'Time Since Last Dose (at Trough Draw)': time_since_last_dose_formatted, # Use formatted string
                              'Measured Trough': f"{trough_measured:.1f} mg/L",
                              'Trough Status vs Target': trough_status, # Add status
                              'Estimated Population Vd': f"{vd_calc:.1f} L",
@@ -843,11 +868,12 @@ elif mode == "Trough-Only":
 
                      else:
                          st.error("Could not calculate valid Ke and/or Vd. Cannot proceed with AUC/New Dose calculation or interpretation.")
+                         # V6 Change: Store formatted time string in results even on error
                          pk_results = { # Update results to show failure
                              'Calculation Mode': 'Trough-Only',
                              'Current Dose': f"{dose_int_current} mg",
                              'Current Dosing Interval': f"q{current_interval_h}h",
-                             'Time Since Last Dose (at Trough Draw)': f"{time_since_last_dose_h:.2f} h",
+                             'Time Since Last Dose (at Trough Draw)': time_since_last_dose_formatted, # Use formatted string
                              'Measured Trough': f"{trough_measured:.1f} mg/L",
                              'Trough Status vs Target': check_target_status(trough_measured, target_trough_range_calc), # Still check trough
                              'Error': 'Failed to calculate valid Ke/Vd from trough level.',
@@ -914,6 +940,10 @@ elif mode == "Peak & Trough":
 
         infusion_duration_h = hours_diff(infusion_start_time, infusion_end_time)
         time_from_infusion_end_to_peak_draw_h = hours_diff(infusion_end_time, peak_sample_time)
+        # V6: Format durations for display
+        infusion_duration_formatted = format_hours_minutes(infusion_duration_h)
+        time_to_peak_formatted = format_hours_minutes(time_from_infusion_end_to_peak_draw_h)
+
 
         valid_times = True
         if infusion_duration_h <= 0:
@@ -924,7 +954,8 @@ elif mode == "Peak & Trough":
              valid_times = False
 
         if valid_times:
-             st.info(f"Calculated Durations: Infusion={infusion_duration_h:.2f}h | Delay to Peak Draw={time_from_infusion_end_to_peak_draw_h:.2f}h. Current Interval: **q{current_interval_h_pt}h**.")
+             # V6: Use formatted strings in st.info
+             st.info(f"Calculated Durations: Infusion={infusion_duration_formatted} | Delay to Peak Draw={time_to_peak_formatted}. Current Interval: **q{current_interval_h_pt}h**.")
              time_between_peak_draw_and_trough_draw_h_check = current_interval_h_pt - infusion_duration_h - time_from_infusion_end_to_peak_draw_h
              if time_between_peak_draw_and_trough_draw_h_check <= 0:
                  st.warning("Timing Error: The interval is too short for the specified infusion and peak draw times. Ke calculation will likely fail.")
@@ -1016,12 +1047,13 @@ elif mode == "Peak & Trough":
                             new_dose_suggestion = "N/A (Missing Parameters)"
 
 
+                        # V6 Change: Store formatted time strings in results
                         pk_results = {
                             'Calculation Mode': 'Peak & Trough',
                             'Dose Administered': f"{dose_for_levels} mg",
                             'Current Dosing Interval': f"q{current_interval_h_pt}h",
-                            'Infusion Duration': f"{infusion_duration_h:.2f} h",
-                            'Time to Peak Draw (post-infusion)': f"{time_from_infusion_end_to_peak_draw_h:.2f} h",
+                            'Infusion Duration': infusion_duration_formatted, # Use formatted string
+                            'Time to Peak Draw (post-infusion)': time_to_peak_formatted, # Use formatted string
                             'Measured Peak (at draw time)': f"{c_peak_measured:.1f} mg/L",
                             'Measured Trough (Cmin)': f"{c_trough_measured:.1f} mg/L",
                             'Trough Status vs Target': trough_status, # Add status
@@ -1046,13 +1078,18 @@ elif mode == "Peak & Trough":
 
                     else:
                         st.error("Failed to calculate PK parameters from Peak & Trough data. Check input values and timings.")
-                        # Keep pk_results as the initial error dictionary
-                        pk_results['Dose Administered'] = f"{dose_for_levels} mg" # Add context
-                        pk_results['Current Dosing Interval'] = f"q{current_interval_h_pt}h"
-                        pk_results['Measured Peak'] = f"{c_peak_measured:.1f} mg/L"
-                        pk_results['Measured Trough'] = f"{c_trough_measured:.1f} mg/L"
-                        pk_results['Trough Status vs Target'] = check_target_status(c_trough_measured, target_trough_range_calc) # Still check trough
-                        pk_results['AUC Status vs Target'] = "N/A (Calculation Failed)"
+                        # V6 Change: Store formatted time strings in results even on error
+                        pk_results = {
+                            "Error": "Failed to calculate PK parameters from Peak & Trough data.",
+                            'Dose Administered': f"{dose_for_levels} mg",
+                            'Current Dosing Interval': f"q{current_interval_h_pt}h",
+                            'Infusion Duration': infusion_duration_formatted,
+                            'Time to Peak Draw (post-infusion)': time_to_peak_formatted,
+                            'Measured Peak': f"{c_peak_measured:.1f} mg/L",
+                            'Measured Trough': f"{c_trough_measured:.1f} mg/L",
+                            'Trough Status vs Target': check_target_status(c_trough_measured, target_trough_range_calc), # Still check trough
+                            'AUC Status vs Target': "N/A (Calculation Failed)"
+                        }
                         interpretation_text = "Interpretation unavailable due to calculation error."
 
 
@@ -1091,5 +1128,5 @@ elif mode == "Peak & Trough":
 # --- Footer ---
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational and informational purposes only. Consult official guidelines and clinical judgment for patient care decisions.")
-# V5 Change: Update version number in footer
-st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App version: V5 | Last updated: {datetime.now().strftime('%Y-%m-%d')}")
+# V6 Change: Update version number in footer
+st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App version: V6 | Last updated: {datetime.now().strftime('%Y-%m-%d')}")
