@@ -11,12 +11,14 @@ V3: Added code-based target status checks (Trough/AUC vs. Target) displayed befo
 V4: Upgraded LLM to ChatOpenAI (gpt-4o) and significantly refined prompt for better clinical reasoning
     (clearance evaluation, interval appropriateness, expected vs. measured, rationale linking).
     Added expected CL calculation based on CrCl for comparison.
+V5: Refined "Overall Goal" prompt wording for more natural language.
+    Added current date context to prompt and instructed LLM to estimate follow-up level date.
 """
 import os
 import math
 import re # Import regex for parsing target strings
 import streamlit as st
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date # Added date
 import logging # Added for better error logging
 
 # --- 1. SET PAGE CONFIG (MUST BE THE FIRST STREAMLIT COMMAND) ---
@@ -411,9 +413,9 @@ def calculate_pk_params_peak_trough(
         logging.error(f"Math error calculating PK parameters (peak/trough): {e}.")
         return None
 
-# --- 8. LLM INTERPRETATION (V4 - Refined Prompt for Chat Model) ---
-# --- V4 Change: Added expected_cl_crcl parameter ---
-def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_notes: str, expected_cl_crcl: float) -> str:
+# --- 8. LLM INTERPRETATION (V5 - Refined Prompt for Chat Model) ---
+# --- V5 Change: Added current_date parameter ---
+def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_notes: str, expected_cl_crcl: float, current_date: date) -> str:
     """Generates interpretation and recommendations using the RAG chain, including clinical notes."""
     if qa_chain is None:
         logging.warning("QA chain not loaded. Skipping interpretation.")
@@ -445,6 +447,7 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     expected_cmax_str = f"{expected_cmax:.1f} mg/L" if isinstance(expected_cmax, (float, int)) else str(expected_cmax)
     expected_cmin_str = f"{expected_cmin:.1f} mg/L" if isinstance(expected_cmin, (float, int)) else str(expected_cmin)
     calculated_cl_str = f"{calculated_cl:.2f} L/hr" if calculated_cl > 0 else "N/A"
+    current_date_str = current_date.strftime('%Y-%m-%d') # V5 Change: Format current date
 
     time_context = f"Consider the actual time the trough was drawn ({time_since_dose_info})." if time_since_dose_info != 'N/A' else ""
     notes_context = f"\n\nClinical Notes Provided:\n{clinical_notes}" if clinical_notes else ""
@@ -453,9 +456,9 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     # Add the objective status check result to the context for the LLM
     objective_status_context = f"\nObjective Status Check:\n- Trough Status: {trough_status}\n- AUC Status: {auc_status}\n"
 
-    # --- V4 Change: Refined Prompt ---
+    # --- V5 Change: Refined Prompt (Overall Goal, Follow-up Date) ---
     prompt = f"""
-Context: You are a clinical pharmacokinetics expert interpreting vancomycin TDM results based on the Clinical Pharmacokinetics Pharmacy Handbook, 2nd edition.
+Context: You are a clinical pharmacokinetics expert interpreting vancomycin TDM results based on the Clinical Pharmacokinetics Pharmacy Handbook, 2nd edition. Today's date is {current_date_str}.
 
 Patient Information Summary:
 - Estimated Creatinine Clearance (CrCl): {crcl:.1f} mL/min (Expected Vanco CL ~ {expected_cl_crcl:.2f} L/hr based on 0.7*CrCl)
@@ -470,7 +473,7 @@ Task: Provide a concise, structured interpretation and recommendation, consideri
 1.  **Assessment:**
     * **Trough Level:** State the Measured Trough ({measured_trough_str}), the target trough range from '{target_level_desc}', and the objective status ({trough_status}).
     * **AUC Level:** State the Calculated AUC ({calculated_auc_str}), the target AUC range from '{target_level_desc}', and the objective status ({auc_status}).
-    * **Overall Goal:** Based *only* on the objective status check, is the overall therapeutic goal currently being met?
+    * **Overall Goal:** Based on the Trough Status ({trough_status}) and AUC Status ({auc_status}) compared to the target ranges ({target_level_desc}), is the overall therapeutic goal currently being met?
     * **Clearance Evaluation:** Compare the patient's calculated clearance ({calculated_cl_str}) to the expected clearance based on CrCl ({expected_cl_crcl:.2f} L/hr). Is the calculated clearance significantly different (higher/lower) than expected? What might this imply (e.g., discrepancy in Vd estimate, changing renal function, accuracy of levels/timing)? {time_context}
     * **Interval Assessment:** Evaluate the current interval ({current_interval_info}) against the calculated half-life ({calculated_thalf_str}). An interval is often suitable if it's 1-2 times the half-life. If the half-life is significantly shorter than the interval (e.g., t1/2 < Interval / 2), recommend considering a shorter interval (e.g., q8h instead of q12h). Justify the interval recommendation (keeping or changing) based on kinetics (t1/2 vs interval, target levels) and clinical context (if available). Avoid simply stating 'maintain interval' if kinetics suggest otherwise without a clear reason.
     * **Clinical Alignment:** Does the clinical picture (from notes, if provided) align with the levels? (e.g., therapeutic levels but ongoing fever?)
@@ -489,13 +492,13 @@ Task: Provide a concise, structured interpretation and recommendation, consideri
     * Link the decision directly to the specific findings in the Assessment. **Explicitly reference the Objective Status Check results** (e.g., 'The dose increase is recommended because the Measured Trough was {trough_status} and the Estimated AUC was {auc_status}, failing to meet the {target_level_desc} goal.'). Also mention clearance evaluation, interval assessment, and clinical notes as applicable.
 
 4.  **Follow-up:**
-    * Suggest *specific* monitoring. When should the next level be drawn (e.g., trough before 3rd/4th dose of new regimen)?
+    * Suggest *specific* monitoring. When should the next level be drawn (e.g., 'trough before 3rd/4th dose of new regimen')? If recommending a new regimen, estimate the approximate date/day for this level based on the recommended interval and today's date ({current_date_str}).
     * Should renal function (SCr) be monitored more frequently?
     * Mention any other relevant clinical monitoring based on the notes.
 
 Use the provided guideline knowledge. Be specific and clinically oriented. Ensure the response is complete and directly supported by the provided data and objective status check.
 """
-    logging.info(f"Generating interpretation with refined prompt (V4) for model {qa_chain.llm.model_name if hasattr(qa_chain, 'llm') else 'N/A'}:\n{prompt}")
+    logging.info(f"Generating interpretation with refined prompt (V5) for model {qa_chain.llm.model_name if hasattr(qa_chain, 'llm') else 'N/A'}:\n{prompt}")
     try:
         # Use invoke for newer Langchain versions
         if hasattr(qa_chain, 'invoke'):
@@ -716,6 +719,9 @@ results_container = st.container()
 # --- SCr Conversion (Do it once here after input) ---
 scr_mgdl = convert_scr_to_mgdl(scr_umol)
 
+# --- V5 Change: Get current date for interpretation context ---
+current_run_date = datetime.now().date()
+
 if mode == "Initial Dose":
     with results_container:
         st.subheader("🚀 Initial Loading Dose Calculation")
@@ -830,8 +836,8 @@ elif mode == "Trough-Only":
                          }
                          # Only run interpretation if RAG chain loaded
                          if qa_chain:
-                             # --- V4 Change: Pass expected_cl_crcl to interpret ---
-                             interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes, expected_cl_crcl)
+                             # --- V5 Change: Pass current_run_date to interpret ---
+                             interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes, expected_cl_crcl, current_run_date)
                          else:
                              interpretation_text = "Interpretation disabled: RAG system not loaded."
 
@@ -1033,8 +1039,8 @@ elif mode == "Peak & Trough":
                         }
                         # Only run interpretation if RAG chain loaded
                         if qa_chain:
-                            # --- V4 Change: Pass expected_cl_crcl to interpret ---
-                            interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes, expected_cl_crcl)
+                            # --- V5 Change: Pass current_run_date to interpret ---
+                            interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes, expected_cl_crcl, current_run_date)
                         else:
                             interpretation_text = "Interpretation disabled: RAG system not loaded."
 
@@ -1085,4 +1091,5 @@ elif mode == "Peak & Trough":
 # --- Footer ---
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational and informational purposes only. Consult official guidelines and clinical judgment for patient care decisions.")
-st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App version: V4 | Last updated: {datetime.now().strftime('%Y-%m-%d')}")
+# V5 Change: Update version number in footer
+st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App version: V5 | Last updated: {datetime.now().strftime('%Y-%m-%d')}")
