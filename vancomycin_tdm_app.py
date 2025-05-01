@@ -8,6 +8,9 @@ Peak/Trough Vd and Expected Levels updated based on provided formulas.
 Increased LLM max_tokens and refined LLM prompt for better recommendations.
 V2: Refined LLM prompt in interpret() to explicitly compare levels/AUC to targets.
 V3: Added code-based target status checks (Trough/AUC vs. Target) displayed before LLM interpretation.
+V4: Upgraded LLM to ChatOpenAI (gpt-4o) and significantly refined prompt for better clinical reasoning
+    (clearance evaluation, interval appropriateness, expected vs. measured, rationale linking).
+    Added expected CL calculation based on CrCl for comparison.
 """
 import os
 import math
@@ -61,7 +64,8 @@ if api_key_loaded:
         from langchain_openai import OpenAIEmbeddings # Moved to langchain-openai
         from langchain_community.vectorstores import FAISS # Moved to langchain-community
         from langchain.chains import RetrievalQA # Still in langchain core (usually)
-        from langchain_openai import OpenAI # LLM moved to langchain-openai
+        # --- V4 Change: Import ChatOpenAI instead of OpenAI ---
+        from langchain_openai import ChatOpenAI # LLM moved to langchain-openai
 
         logging.info("Required libraries imported successfully.")
         libraries_loaded = True
@@ -121,9 +125,12 @@ def load_rag_chain(pdf_path: str) -> RetrievalQA | None:
 
         # Build QA chain
         logging.info("Building RetrievalQA chain...")
-        # --- Increased max_tokens for potentially longer interpretations ---
+        # --- V4 Change: Use ChatOpenAI with gpt-4o and increased tokens ---
+        llm = ChatOpenAI(model_name="gpt-4o",
+                         temperature=0,
+                         max_tokens=700) # Increased token limit slightly more
         qa = RetrievalQA.from_chain_type(
-            llm=OpenAI(temperature=0, max_tokens=512), # Increased token limit
+            llm=llm,
             chain_type="stuff",
             retriever=index.as_retriever()
         )
@@ -404,8 +411,9 @@ def calculate_pk_params_peak_trough(
         logging.error(f"Math error calculating PK parameters (peak/trough): {e}.")
         return None
 
-# --- 8. LLM INTERPRETATION (Refined Prompt V2 - Keep as is for now) ---
-def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_notes: str) -> str:
+# --- 8. LLM INTERPRETATION (V4 - Refined Prompt for Chat Model) ---
+# --- V4 Change: Added expected_cl_crcl parameter ---
+def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_notes: str, expected_cl_crcl: float) -> str:
     """Generates interpretation and recommendations using the RAG chain, including clinical notes."""
     if qa_chain is None:
         logging.warning("QA chain not loaded. Skipping interpretation.")
@@ -421,6 +429,13 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     expected_cmin = pk_results.get('Expected_Cmin', 'N/A')
     trough_status = pk_results.get('Trough Status vs Target', 'N/A') # Get code-checked status
     auc_status = pk_results.get('AUC Status vs Target', 'N/A') # Get code-checked status
+    # V4 Change: Get calculated CL if available
+    calculated_cl = pk_results.get('CL_individual', 0.0)
+    if calculated_cl == 0.0: # Try estimating from trough-only params if CL_individual not present
+        ke_est = pk_results.get('Estimated Ke')
+        vd_est = pk_results.get('Estimated Population Vd', pk_results.get('Vd_individual')) # Use pop Vd if individual not there
+        if isinstance(ke_est, float) and isinstance(vd_est, float) and ke_est > 0 and vd_est > 0:
+            calculated_cl = ke_est * vd_est
 
 
     # Format values for prompt, handling N/A
@@ -429,19 +444,21 @@ def interpret(crcl: float, pk_results: dict, target_level_desc: str, clinical_no
     calculated_thalf_str = f"{calculated_thalf:.1f} h" if isinstance(calculated_thalf, (float, int)) else str(calculated_thalf)
     expected_cmax_str = f"{expected_cmax:.1f} mg/L" if isinstance(expected_cmax, (float, int)) else str(expected_cmax)
     expected_cmin_str = f"{expected_cmin:.1f} mg/L" if isinstance(expected_cmin, (float, int)) else str(expected_cmin)
+    calculated_cl_str = f"{calculated_cl:.2f} L/hr" if calculated_cl > 0 else "N/A"
 
     time_context = f"Consider the actual time the trough was drawn ({time_since_dose_info})." if time_since_dose_info != 'N/A' else ""
     notes_context = f"\n\nClinical Notes Provided:\n{clinical_notes}" if clinical_notes else ""
-    half_life_info = f"Calculated half-life is {calculated_thalf_str}." if calculated_thalf_str != 'N/A' else ""
+    half_life_info = f"Calculated half-life is {calculated_thalf_str}." if calculated_thalf_str != 'N/A' else "Half-life calculation failed."
 
     # Add the objective status check result to the context for the LLM
     objective_status_context = f"\nObjective Status Check:\n- Trough Status: {trough_status}\n- AUC Status: {auc_status}\n"
 
+    # --- V4 Change: Refined Prompt ---
     prompt = f"""
 Context: You are a clinical pharmacokinetics expert interpreting vancomycin TDM results based on the Clinical Pharmacokinetics Pharmacy Handbook, 2nd edition.
 
 Patient Information Summary:
-- Estimated Creatinine Clearance (CrCl): {crcl:.1f} mL/min
+- Estimated Creatinine Clearance (CrCl): {crcl:.1f} mL/min (Expected Vanco CL ~ {expected_cl_crcl:.2f} L/hr based on 0.7*CrCl)
 - Selected Therapeutic Target: {target_level_desc}
 {notes_context}
 
@@ -454,22 +471,22 @@ Task: Provide a concise, structured interpretation and recommendation, consideri
     * **Trough Level:** State the Measured Trough ({measured_trough_str}), the target trough range from '{target_level_desc}', and the objective status ({trough_status}).
     * **AUC Level:** State the Calculated AUC ({calculated_auc_str}), the target AUC range from '{target_level_desc}', and the objective status ({auc_status}).
     * **Overall Goal:** Based *only* on the objective status check, is the overall therapeutic goal currently being met?
-    * **Clearance:** Is the patient clearing the drug as expected based on CrCl? {time_context}
-    * **Interval Appropriateness:** Is the current dosing interval ({current_interval_info}) appropriate given the calculated half-life ({half_life_info})?
+    * **Clearance Evaluation:** Compare the patient's calculated clearance ({calculated_cl_str}) to the expected clearance based on CrCl ({expected_cl_crcl:.2f} L/hr). Is the calculated clearance significantly different (higher/lower) than expected? What might this imply (e.g., discrepancy in Vd estimate, changing renal function, accuracy of levels/timing)? {time_context}
+    * **Interval Assessment:** Evaluate the current interval ({current_interval_info}) against the calculated half-life ({calculated_thalf_str}). An interval is often suitable if it's 1-2 times the half-life. If the half-life is significantly shorter than the interval (e.g., t1/2 < Interval / 2), recommend considering a shorter interval (e.g., q8h instead of q12h). Justify the interval recommendation (keeping or changing) based on kinetics (t1/2 vs interval, target levels) and clinical context (if available). Avoid simply stating 'maintain interval' if kinetics suggest otherwise without a clear reason.
     * **Clinical Alignment:** Does the clinical picture (from notes, if provided) align with the levels? (e.g., therapeutic levels but ongoing fever?)
-    * **Expected vs. Measured:** If available, compare measured levels (Trough: {measured_trough_str}) to the 'Expected_Cmin' ({expected_cmin_str}) calculated for the current regimen. Are they similar or significantly different? (Also consider Cmax if applicable: Measured Peak/Extrapolated vs Expected Cmax {expected_cmax_str}).
+    * **Expected vs. Measured:** If available, compare measured levels (Trough: {measured_trough_str}) to the 'Expected_Cmin' ({expected_cmin_str}) calculated for the current regimen. Are they similar or significantly different? (Also consider Cmax if applicable: Measured Peak/Extrapolated vs Expected Cmax {expected_cmax_str}). What could a significant difference imply (e.g., inaccurate PK parameter estimation, non-steady state, timing errors)?
 
 2.  **Recommendation:**
     * Clearly state whether a dose/interval change is needed based on the Assessment (especially the objective status).
     * If adjustment is needed:
-        * Suggest a specific dose (rounded to nearest 250mg) AND a standard clinical interval (e.g., q8h, q12h, q24h). Reference the 'Suggested New Dose' field from the results if available and appropriate.
-        * Prioritize maintaining the current interval unless the half-life or clinical context strongly suggests a change. If changing the interval, explain why.
+        * Suggest a specific dose (rounded to nearest 250mg) AND a standard clinical interval (e.g., q8h, q12h, q24h). Reference the 'Suggested New Dose' field from the results if available and appropriate for the chosen interval.
+        * If recommending an **interval change** based on the Interval Assessment, clearly state the **new interval** and provide a **calculated dose for that new interval** (referencing any pre-calculated alternative doses if available in pk_results, otherwise state the need for recalculation).
     * If no change needed, state the current regimen is appropriate.
     * **Prioritization:** If clinical notes suggest poor response despite 'therapeutic' levels, prioritize recommending a dose increase or broader clinical review over simply stating levels are adequate. Conversely, if notes indicate clinical improvement despite slightly low levels, consider if maintaining the current dose is acceptable.
 
 3.  **Rationale:**
     * Explain *why* the recommendation is being made.
-    * Link the decision directly to the specific findings in the Assessment (objective status, levels vs. target, AUC vs. target, Ke, Vd, CrCl, half-life vs. interval, clinical notes). Be specific about which parameters justify the recommendation.
+    * Link the decision directly to the specific findings in the Assessment. **Explicitly reference the Objective Status Check results** (e.g., 'The dose increase is recommended because the Measured Trough was {trough_status} and the Estimated AUC was {auc_status}, failing to meet the {target_level_desc} goal.'). Also mention clearance evaluation, interval assessment, and clinical notes as applicable.
 
 4.  **Follow-up:**
     * Suggest *specific* monitoring. When should the next level be drawn (e.g., trough before 3rd/4th dose of new regimen)?
@@ -478,9 +495,9 @@ Task: Provide a concise, structured interpretation and recommendation, consideri
 
 Use the provided guideline knowledge. Be specific and clinically oriented. Ensure the response is complete and directly supported by the provided data and objective status check.
 """
-    logging.info(f"Generating interpretation with prompt:\n{prompt}")
+    logging.info(f"Generating interpretation with refined prompt (V4) for model {qa_chain.llm.model_name if hasattr(qa_chain, 'llm') else 'N/A'}:\n{prompt}")
     try:
-        # Use invoke for newer Langchain versions if available
+        # Use invoke for newer Langchain versions
         if hasattr(qa_chain, 'invoke'):
             response = qa_chain.invoke({"query": prompt})
             # Handle both dict and string responses from invoke/run
@@ -488,6 +505,9 @@ Use the provided guideline knowledge. Be specific and clinically oriented. Ensur
                 response_text = response['result']
             elif isinstance(response, str):
                  response_text = response
+            # Handle response from Chat models which might be AIMessage object
+            elif hasattr(response, 'content') and isinstance(response.content, str):
+                response_text = response.content
             else:
                  response_text = str(response) # Fallback
                  logging.warning(f"Unexpected response type from qa_chain.invoke: {type(response)}. Converted to string.")
@@ -641,7 +661,7 @@ clinical_notes = st.sidebar.text_area(
 )
 
 # --- Helper function to build a downloadable report ---
-def build_report(lines: list[str], scr_umol_report: float, clinical_notes_report: str) -> str:
+def build_report(lines: dict, scr_umol_report: float, clinical_notes_report: str) -> str: # Changed lines type to dict
     """Formats patient info and results into a text report."""
     scr_mgdl_report = convert_scr_to_mgdl(scr_umol_report)
     # Calculate population Vd for the header
@@ -665,21 +685,28 @@ def build_report(lines: list[str], scr_umol_report: float, clinical_notes_report
             clinical_notes_report.replace('\n', '\n  ') # Indent notes slightly
         ])
     hdr.append("--- Results & Interpretation ---")
+
     # Use a more robust way to format lines from dict for report
     report_body = []
-    for k, v in lines.items(): # Assuming lines is now the pk_results dict
+    interpretation_content = None
+    interpretation_key = "RAG Interpretation"
+
+    # Separate interpretation from other results
+    if interpretation_key in lines:
+        interpretation_content = lines.pop(interpretation_key) # Remove interpretation for separate handling
+
+    # Format the rest of the results
+    for k, v in lines.items():
          report_body.append(f"{k}: {v}")
 
-    # Find interpretation if it exists and add it formatted
-    interpretation_key = "RAG Interpretation"
-    interpretation_content = lines.get(interpretation_key, None)
+    # Add interpretation at the end if it exists
     if interpretation_content:
-         report_body.append(f"--- {interpretation_key} ---")
-         report_body.append(interpretation_content.replace('\n', '\n  '))
-         # Remove it from the main list if it was added separately
-         if interpretation_key in lines:
-             # This part might need adjustment depending on how interpretation is added
-             pass # Logic to avoid duplication if needed
+        report_body.append(f"\n--- {interpretation_key} ---")
+        # Ensure interpretation content is a string before replacing
+        if isinstance(interpretation_content, str):
+            report_body.append(interpretation_content.replace('\n', '\n  '))
+        else:
+            report_body.append(str(interpretation_content).replace('\n', '\n  ')) # Convert to string if not already
 
     return "\n".join(hdr + report_body)
 
@@ -752,6 +779,12 @@ elif mode == "Trough-Only":
                      vd_calc = calculate_population_vd(wt, age) # Use population Vd
                      ke_calc = calculate_ke_trough(dose_int_current, vd_calc, trough_measured, time_since_last_dose_h)
 
+                     # --- V4 Change: Calculate expected CL from CrCl ---
+                     expected_cl_crcl = 0.0
+                     if crcl_calc > 0:
+                         expected_cl_crcl = 0.7 * crcl_calc * 60 / 1000 # L/hr
+                     # --- End V4 Change ---
+
                      interpretation_text = "N/A (Calculation Error or RAG disabled)"
                      pk_results = {"Error": "Initial calculation failed or Ke invalid."}
                      new_dose_calc = 0 # Initialize
@@ -797,9 +830,10 @@ elif mode == "Trough-Only":
                          }
                          # Only run interpretation if RAG chain loaded
                          if qa_chain:
-                              interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes)
+                             # --- V4 Change: Pass expected_cl_crcl to interpret ---
+                             interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes, expected_cl_crcl)
                          else:
-                              interpretation_text = "Interpretation disabled: RAG system not loaded."
+                             interpretation_text = "Interpretation disabled: RAG system not loaded."
 
                      else:
                          st.error("Could not calculate valid Ke and/or Vd. Cannot proceed with AUC/New Dose calculation or interpretation.")
@@ -840,7 +874,8 @@ elif mode == "Trough-Only":
 
                      # Prepare dict for report
                      report_dict = pk_results.copy()
-                     if interpretation_text not in ["N/A (Calculation Error or RAG disabled)", "Interpretation disabled: RAG system not loaded.", "Interpretation unavailable due to calculation error."]:
+                     # Add interpretation only if it's valid content
+                     if interpretation_text and "N/A" not in interpretation_text and "disabled" not in interpretation_text and "unavailable" not in interpretation_text:
                          report_dict["RAG Interpretation"] = interpretation_text
 
                      report_data = build_report(report_dict, scr_umol, clinical_notes)
@@ -886,7 +921,7 @@ elif mode == "Peak & Trough":
              st.info(f"Calculated Durations: Infusion={infusion_duration_h:.2f}h | Delay to Peak Draw={time_from_infusion_end_to_peak_draw_h:.2f}h. Current Interval: **q{current_interval_h_pt}h**.")
              time_between_peak_draw_and_trough_draw_h_check = current_interval_h_pt - infusion_duration_h - time_from_infusion_end_to_peak_draw_h
              if time_between_peak_draw_and_trough_draw_h_check <= 0:
-                  st.warning("Timing Error: The interval is too short for the specified infusion and peak draw times. Ke calculation will likely fail.")
+                 st.warning("Timing Error: The interval is too short for the specified infusion and peak draw times. Ke calculation will likely fail.")
 
         calc_button = st.button("Run Peak & Trough Analysis", key="run_peak_trough")
 
@@ -913,6 +948,12 @@ elif mode == "Peak & Trough":
                         dose=dose_for_levels, # Pass dose
                         weight=wt # Pass weight
                     )
+
+                    # --- V4 Change: Calculate expected CL from CrCl ---
+                    expected_cl_crcl = 0.0
+                    if crcl_calc > 0:
+                        expected_cl_crcl = 0.7 * crcl_calc * 60 / 1000 # L/hr
+                    # --- End V4 Change ---
 
                     interpretation_text = "N/A (Calculation Error or RAG disabled)"
                     pk_results = {"Error": "Failed to calculate PK parameters from Peak & Trough data."}
@@ -954,19 +995,19 @@ elif mode == "Peak & Trough":
 
                         # --- Suggested Dose Calculation using Individual Parameters ---
                         if ke_ind > 0 and vd_ind > 0 and current_interval_h_pt > 0 and cl_ind > 0 and target_auc_for_dose_calc > 0:
-                             try:
-                                 # Target Dose = Target AUC_interval * CL_ind
-                                 target_auc_interval = target_auc_for_dose_calc * (current_interval_h_pt / 24.0)
-                                 new_dose_raw = target_auc_interval * cl_ind
-                                 new_dose_rounded = round_dose(new_dose_raw)
-                                 new_dose_suggestion = f"{new_dose_rounded} mg q{current_interval_h_pt}h"
-                                 st.metric(label=f"Suggested Dose (for Target AUC ~{target_auc_for_dose_calc})", value=new_dose_suggestion, help=f"Calculated to achieve target AUC ({target_auc_for_dose_calc}) using individual CL and current interval.")
-                             except Exception as dose_calc_err:
-                                 st.warning(f"Could not calculate suggested dose: {dose_calc_err}")
-                                 new_dose_suggestion = "N/A (Calculation Error)"
+                            try:
+                                # Target Dose = Target AUC_interval * CL_ind
+                                target_auc_interval = target_auc_for_dose_calc * (current_interval_h_pt / 24.0)
+                                new_dose_raw = target_auc_interval * cl_ind
+                                new_dose_rounded = round_dose(new_dose_raw)
+                                new_dose_suggestion = f"{new_dose_rounded} mg q{current_interval_h_pt}h"
+                                st.metric(label=f"Suggested Dose (for Target AUC ~{target_auc_for_dose_calc})", value=new_dose_suggestion, help=f"Calculated to achieve target AUC ({target_auc_for_dose_calc}) using individual CL and current interval.")
+                            except Exception as dose_calc_err:
+                                st.warning(f"Could not calculate suggested dose: {dose_calc_err}")
+                                new_dose_suggestion = "N/A (Calculation Error)"
                         else:
-                             st.warning("Cannot suggest new dose without valid Individual Ke, Vd, Interval, and Target AUC.")
-                             new_dose_suggestion = "N/A (Missing Parameters)"
+                            st.warning("Cannot suggest new dose without valid Individual Ke, Vd, Interval, and Target AUC.")
+                            new_dose_suggestion = "N/A (Missing Parameters)"
 
 
                         pk_results = {
@@ -992,9 +1033,10 @@ elif mode == "Peak & Trough":
                         }
                         # Only run interpretation if RAG chain loaded
                         if qa_chain:
-                             interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes)
+                            # --- V4 Change: Pass expected_cl_crcl to interpret ---
+                            interpretation_text = interpret(crcl_calc, pk_results, target_level_desc, clinical_notes, expected_cl_crcl)
                         else:
-                             interpretation_text = "Interpretation disabled: RAG system not loaded."
+                            interpretation_text = "Interpretation disabled: RAG system not loaded."
 
                     else:
                         st.error("Failed to calculate PK parameters from Peak & Trough data. Check input values and timings.")
@@ -1027,7 +1069,8 @@ elif mode == "Peak & Trough":
 
                     # Prepare dict for report
                     report_dict = pk_results.copy()
-                    if interpretation_text not in ["N/A (Calculation Error or RAG disabled)", "Interpretation disabled: RAG system not loaded.", "Interpretation unavailable due to calculation error."]:
+                    # Add interpretation only if it's valid content
+                    if interpretation_text and "N/A" not in interpretation_text and "disabled" not in interpretation_text and "unavailable" not in interpretation_text:
                         report_dict["RAG Interpretation"] = interpretation_text
 
                     report_data = build_report(report_dict, scr_umol, clinical_notes)
@@ -1042,5 +1085,4 @@ elif mode == "Peak & Trough":
 # --- Footer ---
 st.markdown("---")
 st.caption("Disclaimer: This tool is for educational and informational purposes only. Consult official guidelines and clinical judgment for patient care decisions.")
-st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App version: V3 | Last updated: {datetime.now().strftime('%Y-%m-%d')}")
-
+st.caption(f"Guideline source: Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.) | App version: V4 | Last updated: {datetime.now().strftime('%Y-%m-%d')}")
