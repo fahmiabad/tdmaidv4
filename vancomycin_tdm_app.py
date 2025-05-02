@@ -509,6 +509,30 @@ def render_interpretation(trough_status, trough_measured, auc_status, auc24, tha
     
     return interpretation_html
 
+# Define the hours_diff and format_hours_minutes functions at the module level
+# Calculate the time difference in hours
+def hours_diff(start, end):
+    today = datetime.today().date()
+    dt_start = datetime.combine(today, start)
+    dt_end = datetime.combine(today, end)
+    if dt_end < dt_start:  # Handle overnight intervals
+        dt_end += timedelta(days=1)
+    return (dt_end - dt_start).total_seconds() / 3600
+
+# Format time difference for display
+def format_hours_minutes(decimal_hours):
+    if decimal_hours < 0:
+        return "Invalid time"
+    total_minutes = int(round(decimal_hours * 60))
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if hours > 0 and minutes > 0:
+        return f"{hours} hours {minutes} minutes"
+    elif hours > 0:
+        return f"{hours} hours"
+    else:
+        return f"{minutes} minutes"
+
 # --- 7. MAIN APP STRUCTURE ---
 def main():
     # Header with modern design
@@ -635,6 +659,189 @@ def main():
                 label="📄 Download Report",
                 data=f"Patient ID: {pid}\nWard: {ward}\nAge: {age} years\nWeight: {wt} kg\nSCr: {scr_umol} µmol/L\nEstimated CrCl: {crcl:.1f} mL/min\nRecommended Initial Loading Dose: {initial_dose} mg (one-time)",
                 file_name=f"vanco_initial_dose_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain"
+            )
+
+    # --- TROUGH-ONLY TAB ---
+    with tabs[1]:
+        st.markdown("""
+        <div class="card">
+            <h2>Trough-Only Analysis</h2>
+            <p>Analyze a single trough level to estimate pharmacokinetic parameters and suggest dose adjustments.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Create a clean form for inputs
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("<h4>Current Regimen</h4>", unsafe_allow_html=True)
+            dose_int_current = st.number_input("Current Dose (mg)", min_value=250, step=250, value=1000, key="to_dose")
+            current_interval_h = st.selectbox(
+                "Dosing Interval",
+                options=[6, 8, 12, 18, 24, 36, 48],
+                index=2,
+                format_func=lambda x: f"q{x}h",
+                key="to_interval"
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("<h4>Level Timing</h4>", unsafe_allow_html=True)
+            dose_time = st.time_input("Last Dose Given At", value=time(8, 0), step=timedelta(minutes=15), key="to_dose_time")
+            sample_time = st.time_input("Trough Level Drawn At", value=time(19, 30), step=timedelta(minutes=15), key="to_sample_time")
+            trough_measured = st.number_input("Measured Trough (mg/L)", min_value=0.1, max_value=100.0, value=10.0, step=0.1, format="%.1f", key="to_trough")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        time_since_last_dose_h = hours_diff(dose_time, sample_time)
+        time_formatted = format_hours_minutes(time_since_last_dose_h)
+        
+        # Show timing info with better styling
+        if time_since_last_dose_h > 0:
+            components.html(f"""
+            <div class="info-box">
+                <strong>Timing Info:</strong> Trough level was drawn <strong>{time_formatted}</strong> after the last dose.
+                Current interval: <strong>q{current_interval_h}h</strong>
+            </div>
+            """, height=100)
+        else:
+            components.html("""
+            <div class="warning-box">
+                <strong>⚠️ Timing Issue:</strong> Sample time must be after the last dose time.
+            </div>
+            """, height=100)
+        
+        # Button with better styling
+        calc_button = st.button("Run Trough Analysis", use_container_width=True, key="run_trough_calc")
+        
+        # Display results when button is clicked
+        if calc_button and time_since_last_dose_h > 0:
+            # Show progress indicator
+            with st.spinner("Analyzing trough level..."):
+                # Simulate calculations
+                scr_mgdl = scr_umol / 88.4
+                
+                # Calculate CrCl
+                if fem:
+                    crcl = ((140 - age) * wt * 0.85) / (72 * scr_mgdl)
+                else:
+                    crcl = ((140 - age) * wt) / (72 * scr_mgdl)
+                
+                # Use population Vd for trough-only estimate
+                vd_calc = 0.7 * wt
+                
+                # Simulate Ke calculation
+                ke_calc = 0.00286 + 0.00331 * (crcl/100)
+                
+                # Calculate half-life
+                t_half_calc = math.log(2) / ke_calc
+                
+                # Simulate AUC calculation
+                cl_calc = ke_calc * vd_calc
+                auc24_calc = (dose_int_current / cl_calc) * (24 / current_interval_h)
+                
+# Calculate new dose
+                target_trough = 15.0  # Example target
+                new_dose_calc = round(target_trough * vd_calc * ke_calc * current_interval_h / (1 - math.exp(-ke_calc * current_interval_h)) / 250) * 250
+                
+                # Status check
+                def check_target_status(value, target_range):
+                    lower, upper = target_range
+                    if value < lower:
+                        return "BELOW TARGET"
+                    elif upper and value > upper:
+                        return "ABOVE TARGET"
+                    else:
+                        return "WITHIN TARGET"
+                
+                # Get target ranges based on selection
+                if "Empirical" in target_level_desc:
+                    trough_range = (10, 15)
+                    auc_range = (400, 600)
+                else:
+                    trough_range = (15, 20)
+                    auc_range = (600, None)
+                
+                trough_status = check_target_status(trough_measured, trough_range)
+                auc_status = check_target_status(auc24_calc, auc_range)
+                
+                # Prepare results for display
+                pk_results = {
+                    'Calculation Mode': 'Trough-Only',
+                    'Current Dose': f"{dose_int_current} mg",
+                    'Current Dosing Interval': f"q{current_interval_h}h",
+                    'Time Since Last Dose (at Trough Draw)': time_formatted,
+                    'Measured Trough': f"{trough_measured:.1f} mg/L",
+                    'Trough Status vs Target': trough_status,
+                    'Estimated Population Vd': f"{vd_calc:.1f} L",
+                    'Estimated Ke': f"{ke_calc:.4f} h⁻¹",
+                    'Estimated t½': f"{t_half_calc:.1f} h",
+                    'Estimated AUC24': f"{auc24_calc:.1f} mg·h/L",
+                    'AUC Status vs Target': auc_status,
+                    'Suggested New Dose': f"{new_dose_calc} mg q{current_interval_h}h"
+                }
+            
+            # Display results in a modern format
+            st.markdown("<h3>Analysis Results</h3>", unsafe_allow_html=True)
+            
+            # Display simplified visual indicators instead of Plotly charts
+            show_level_indicators(trough_measured, trough_range, auc24_calc, auc_range)
+            
+            # Display status section
+            st.markdown("<h4>Target Status</h4>", unsafe_allow_html=True)
+            show_status_section(pk_results)
+            
+            # Display detailed results in a clean grid
+            st.markdown("<h4>PK Parameters</h4>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                components.html(f'<div class="metric-card"><div class="metric-label">CrCl</div><div class="metric-value">{crcl:.1f} mL/min</div></div>', height=80)
+                components.html(f'<div class="metric-card"><div class="metric-label">Estimated Vd</div><div class="metric-value">{vd_calc:.1f} L</div></div>', height=80)
+            with col2:
+                components.html(f'<div class="metric-card"><div class="metric-label">Elimination Rate (Ke)</div><div class="metric-value">{ke_calc:.4f} h⁻¹</div></div>', height=80)
+                components.html(f'<div class="metric-card"><div class="metric-label">Half-life</div><div class="metric-value">{t_half_calc:.1f} h</div></div>', height=80)
+            with col3:
+                components.html(f'<div class="metric-card"><div class="metric-label">AUC₂₄</div><div class="metric-value">{auc24_calc:.1f} mg·h/L</div></div>', height=80)
+                components.html(f'<div class="metric-card"><div class="metric-label">Clearance</div><div class="metric-value">{cl_calc:.2f} L/h</div></div>', height=80)
+            
+            # Recommendation section with better styling
+            st.markdown("<h3>Recommendation</h3>", unsafe_allow_html=True)
+            
+            recommendation_html = f"""
+            <div class="recommendation-card">
+                <div class="recommendation-title">Suggested Dose Adjustment</div>
+                <div class="recommendation-dose">{new_dose_calc} mg q{current_interval_h}h</div>
+                <div class="recommendation-description">Based on the pharmacokinetic analysis and target level ({target_level_desc}).</div>
+            </div>
+            """
+            
+            # Use components.html instead of st.markdown
+            components.html(recommendation_html, height=150)
+            
+            # Fixed AI interpretation with proper rendering
+            st.markdown("<h3>AI-Generated Interpretation</h3>", unsafe_allow_html=True)
+            
+            interpretation_html = render_interpretation(
+                trough_status=trough_status,
+                trough_measured=trough_measured,
+                auc_status=auc_status,
+                auc24=auc24_calc,
+                thalf=t_half_calc,
+                interval_h=current_interval_h,
+                new_dose=new_dose_calc,
+                target_desc=target_level_desc
+            )
+            
+            # Use components.html instead of st.markdown
+            components.html(interpretation_html, height=400)
+            
+            # Download button with better styling
+            st.download_button(
+                label="📄 Download Complete Report",
+                data="Vancomycin TDM Report\n" + "\n".join([f"{k}: {v}" for k, v in pk_results.items()]),
+                file_name=f"vanco_trough_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                 mime="text/plain"
             )
 
@@ -926,17 +1133,6 @@ def main():
                     new_dose=new_dose_rounded,
                     target_desc=target_level_desc
                 )
-
-    # --- FOOTER ---
-    st.markdown("""
-    <div class="footer">
-        <p>Vancomycin TDM Assistant | Based on Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.)</p>
-        <p>Disclaimer: This tool is for educational purposes only. Clinical decisions should be made by qualified healthcare professionals.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-if __name__ == "__main__":
-    main()
                 
                 # Use components.html instead of st.markdown
                 components.html(interpretation_html, height=400)
@@ -949,209 +1145,13 @@ if __name__ == "__main__":
                     mime="text/plain"
                 )
 
-    # --- TROUGH-ONLY TAB ---
-    with tabs[1]:
-        st.markdown("""
-        <div class="card">
-            <h2>Trough-Only Analysis</h2>
-            <p>Analyze a single trough level to estimate pharmacokinetic parameters and suggest dose adjustments.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Create a clean form for inputs
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("<h4>Current Regimen</h4>", unsafe_allow_html=True)
-            dose_int_current = st.number_input("Current Dose (mg)", min_value=250, step=250, value=1000, key="to_dose")
-            current_interval_h = st.selectbox(
-                "Dosing Interval",
-                options=[6, 8, 12, 18, 24, 36, 48],
-                index=2,
-                format_func=lambda x: f"q{x}h",
-                key="to_interval"
-            )
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("<h4>Level Timing</h4>", unsafe_allow_html=True)
-            dose_time = st.time_input("Last Dose Given At", value=time(8, 0), step=timedelta(minutes=15), key="to_dose_time")
-            sample_time = st.time_input("Trough Level Drawn At", value=time(19, 30), step=timedelta(minutes=15), key="to_sample_time")
-            trough_measured = st.number_input("Measured Trough (mg/L)", min_value=0.1, max_value=100.0, value=10.0, step=0.1, format="%.1f", key="to_trough")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Calculate the time difference in hours
-        def hours_diff(start, end):
-            today = datetime.today().date()
-            dt_start = datetime.combine(today, start)
-            dt_end = datetime.combine(today, end)
-            if dt_end < dt_start:  # Handle overnight intervals
-                dt_end += timedelta(days=1)
-            return (dt_end - dt_start).total_seconds() / 3600
-        
-        time_since_last_dose_h = hours_diff(dose_time, sample_time)
-        
-        # Format time difference for display
-        def format_hours_minutes(decimal_hours):
-            if decimal_hours < 0:
-                return "Invalid time"
-            total_minutes = int(round(decimal_hours * 60))
-            hours = total_minutes // 60
-            minutes = total_minutes % 60
-            if hours > 0 and minutes > 0:
-                return f"{hours} hours {minutes} minutes"
-            elif hours > 0:
-                return f"{hours} hours"
-            else:
-                return f"{minutes} minutes"
-        
-        time_formatted = format_hours_minutes(time_since_last_dose_h)
-        
-        # Show timing info with better styling
-        if time_since_last_dose_h > 0:
-            components.html(f"""
-            <div class="info-box">
-                <strong>Timing Info:</strong> Trough level was drawn <strong>{time_formatted}</strong> after the last dose.
-                Current interval: <strong>q{current_interval_h}h</strong>
-            </div>
-            """, height=100)
-        else:
-            components.html("""
-            <div class="warning-box">
-                <strong>⚠️ Timing Issue:</strong> Sample time must be after the last dose time.
-            </div>
-            """, height=100)
-        
-        # Button with better styling
-        calc_button = st.button("Run Trough Analysis", use_container_width=True, key="run_trough_calc")
-        
-        # Display results when button is clicked
-        if calc_button and time_since_last_dose_h > 0:
-            # Show progress indicator
-            with st.spinner("Analyzing trough level..."):
-                # Simulate calculations
-                scr_mgdl = scr_umol / 88.4
-                
-                # Calculate CrCl
-                if fem:
-                    crcl = ((140 - age) * wt * 0.85) / (72 * scr_mgdl)
-                else:
-                    crcl = ((140 - age) * wt) / (72 * scr_mgdl)
-                
-                # Use population Vd for trough-only estimate
-                vd_calc = 0.7 * wt
-                
-                # Simulate Ke calculation
-                ke_calc = 0.00286 + 0.00331 * (crcl/100)
-                
-                # Calculate half-life
-                t_half_calc = math.log(2) / ke_calc
-                
-                # Simulate AUC calculation
-                cl_calc = ke_calc * vd_calc
-                auc24_calc = (dose_int_current / cl_calc) * (24 / current_interval_h)
-                
-                # Calculate new dose
-                target_trough = 15.0  # Example target
-                new_dose_calc = round(target_trough * vd_calc * ke_calc * current_interval_h / (1 - math.exp(-ke_calc * current_interval_h)) / 250) * 250
-                
-                # Status check
-                def check_target_status(value, target_range):
-                    lower, upper = target_range
-                    if value < lower:
-                        return "BELOW TARGET"
-                    elif upper and value > upper:
-                        return "ABOVE TARGET"
-                    else:
-                        return "WITHIN TARGET"
-                
-                # Get target ranges based on selection
-                if "Empirical" in target_level_desc:
-                    trough_range = (10, 15)
-                    auc_range = (400, 600)
-                else:
-                    trough_range = (15, 20)
-                    auc_range = (600, None)
-                
-                trough_status = check_target_status(trough_measured, trough_range)
-                auc_status = check_target_status(auc24_calc, auc_range)
-                
-                # Prepare results for display
-                pk_results = {
-                    'Calculation Mode': 'Trough-Only',
-                    'Current Dose': f"{dose_int_current} mg",
-                    'Current Dosing Interval': f"q{current_interval_h}h",
-                    'Time Since Last Dose (at Trough Draw)': time_formatted,
-                    'Measured Trough': f"{trough_measured:.1f} mg/L",
-                    'Trough Status vs Target': trough_status,
-                    'Estimated Population Vd': f"{vd_calc:.1f} L",
-                    'Estimated Ke': f"{ke_calc:.4f} h⁻¹",
-                    'Estimated t½': f"{t_half_calc:.1f} h",
-                    'Estimated AUC24': f"{auc24_calc:.1f} mg·h/L",
-                    'AUC Status vs Target': auc_status,
-                    'Suggested New Dose': f"{new_dose_calc} mg q{current_interval_h}h"
-                }
-            
-            # Display results in a modern format
-            st.markdown("<h3>Analysis Results</h3>", unsafe_allow_html=True)
-            
-            # Display simplified visual indicators instead of Plotly charts
-            show_level_indicators(trough_measured, trough_range, auc24_calc, auc_range)
-            
-            # Display status section
-            st.markdown("<h4>Target Status</h4>", unsafe_allow_html=True)
-            show_status_section(pk_results)
-            
-            # Display detailed results in a clean grid
-            st.markdown("<h4>PK Parameters</h4>", unsafe_allow_html=True)
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                components.html(f'<div class="metric-card"><div class="metric-label">CrCl</div><div class="metric-value">{crcl:.1f} mL/min</div></div>', height=80)
-                components.html(f'<div class="metric-card"><div class="metric-label">Estimated Vd</div><div class="metric-value">{vd_calc:.1f} L</div></div>', height=80)
-            with col2:
-                components.html(f'<div class="metric-card"><div class="metric-label">Elimination Rate (Ke)</div><div class="metric-value">{ke_calc:.4f} h⁻¹</div></div>', height=80)
-                components.html(f'<div class="metric-card"><div class="metric-label">Half-life</div><div class="metric-value">{t_half_calc:.1f} h</div></div>', height=80)
-            with col3:
-                components.html(f'<div class="metric-card"><div class="metric-label">AUC₂₄</div><div class="metric-value">{auc24_calc:.1f} mg·h/L</div></div>', height=80)
-                components.html(f'<div class="metric-card"><div class="metric-label">Clearance</div><div class="metric-value">{cl_calc:.2f} L/h</div></div>', height=80)
-            
-            # Recommendation section with better styling
-            st.markdown("<h3>Recommendation</h3>", unsafe_allow_html=True)
-            
-            recommendation_html = f"""
-            <div class="recommendation-card">
-                <div class="recommendation-title">Suggested Dose Adjustment</div>
-                <div class="recommendation-dose">{new_dose_calc} mg q{current_interval_h}h</div>
-                <div class="recommendation-description">Based on the pharmacokinetic analysis and target level ({target_level_desc}).</div>
-            </div>
-            """
-            
-            # Use components.html instead of st.markdown
-            components.html(recommendation_html, height=150)
-            
-            # Fixed AI interpretation with proper rendering
-            st.markdown("<h3>AI-Generated Interpretation</h3>", unsafe_allow_html=True)
-            
-            interpretation_html = render_interpretation(
-                trough_status=trough_status,
-                trough_measured=trough_measured,
-                auc_status=auc_status,
-                auc24=auc24_calc,
-                thalf=t_half_calc,
-                interval_h=current_interval_h,
-                new_dose=new_dose_calc,
-                target_desc=target_level_desc
-            )
-            
-            # Use components.html instead of st.markdown
-            components.html(interpretation_html, height=400)
-            
-            # Download button with better styling
-            st.download_button(
-                label="📄 Download Complete Report",
-                data="Vancomycin TDM Report\n" + "\n".join([f"{k}: {v}" for k, v in pk_results.items()]),
-                file_name=f"vanco_trough_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                mime="text/plain"
-            )
+    # --- FOOTER ---
+    st.markdown("""
+    <div class="footer">
+        <p>Vancomycin TDM Assistant | Based on Clinical Pharmacokinetics Pharmacy Handbook (2nd ed.)</p>
+        <p>Disclaimer: This tool is for educational purposes only. Clinical decisions should be made by qualified healthcare professionals.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
