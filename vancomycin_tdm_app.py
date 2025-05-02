@@ -6,8 +6,8 @@ import pandas as pd # Added for potential future data handling if needed
 
 # --- 1. SET PAGE CONFIG ---
 st.set_page_config(
-    page_title="Vancomycin TDM Assistant",
-    page_icon="💊",
+    page_title="TDM-AID (Vancomycin)", # Updated page title
+    page_icon="💊", # Can be a URL to a favicon too
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -40,6 +40,7 @@ st.markdown("""
     /* Style for the main title */
     h1 {
         color: #4F6BF2; /* Primary color from original CSS */
+        padding-top: 10px; /* Add padding to align title with logo */
     }
     /* Style for the subtitle */
     .subtitle {
@@ -59,6 +60,12 @@ st.markdown("""
         font-size: 0.9rem;
         color: #666;
     }
+    /* Align logo column vertically */
+    [data-testid="stHorizontalBlock"] > [data-testid="stVerticalBlock"]:first-child {
+       display: flex;
+       align-items: center; /* Vertically center content in the first column */
+    }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -160,13 +167,19 @@ def display_level_indicator(label, value, target_range, unit):
         delta_str = "Target Met"
         # No delta color change needed for within target
     elif status == "BELOW TARGET":
-        delta_str = f"Below {lower}"
+        # --- UPDATED: Use downward arrow ---
+        delta_str = f"↓ {lower}"
+        # --- END OF UPDATE ---
         delta_color = "inverse" # Red for below target
     elif status == "ABOVE TARGET" and upper is not None:
-        delta_str = f"Above {upper}"
+        # --- UPDATED: Use upward arrow ---
+        delta_str = f"↑ {upper}"
+        # --- END OF UPDATE ---
         delta_color = "inverse" # Red for above target
     elif status == "ABOVE TARGET" and upper is None: # Handle > target case
-        delta_str = f"Above {lower}" # Indicate it's above the minimum threshold
+        # --- UPDATED: Use upward arrow ---
+        delta_str = f"↑ {lower}" # Indicate it's above the minimum threshold
+        # --- END OF UPDATE ---
         # Optionally keep delta_color 'off' or set to 'normal' (green) if exceeding is okay
         delta_color = "normal"
 
@@ -214,8 +227,8 @@ def render_interpretation_st(trough_status, trough_measured, auc_status, auc24, 
         - **Method:** {pk_method}
         - **Measured Trough:** {trough_measured:.1f} mg/L ({trough_status.lower()})
         - **Calculated AUC₂₄:** {auc24:.1f} mg·h/L ({auc_status.lower()})
-        - **Calculated Half-life:** {thalf:.1f} h
-        - **Current Interval:** q{interval_h}h (Interval is likely {'appropriate' if interval_h >= thalf * 1.2 else 'potentially too long/short relative to half-life'})
+        - **Calculated Half-life:** {f'{thalf:.1f}' if thalf is not None else 'N/A'} h
+        - **Current Interval:** q{interval_h}h (Interval is likely {'appropriate' if thalf is not None and interval_h >= thalf * 1.2 else 'potentially too long/short relative to half-life'})
         """
         st.markdown(assessment_text)
 
@@ -245,12 +258,24 @@ def render_interpretation_st(trough_status, trough_measured, auc_status, auc24, 
 # --- 4. MAIN APP STRUCTURE ---
 def main():
     # --- HEADER ---
-    col_icon, col_title = st.columns([1, 10])
-    with col_icon:
-        st.markdown('<div style="font-size: 40px; margin-top: 10px;">💊</div>', unsafe_allow_html=True)
+    # --- UPDATED: Use st.image for logo ---
+    col_logo, col_title = st.columns([1, 5]) # Adjust column ratio as needed
+    with col_logo:
+        # Replace the URL with the path to your logo file or a direct URL
+        # Example using a placeholder:
+        logo_url = "https://placehold.co/150x50/4F6BF2/FFFFFF?text=TDM-AID"
+        # Example using a local file (place 'logo.png' in the same directory as your script):
+        # logo_url = "logo.png"
+        try:
+            st.image(logo_url, width=150) # Adjust width as needed
+        except Exception as e:
+            st.error(f"Could not load logo: {e}") # Handle file not found or URL error
+            st.markdown('<div style="font-size: 40px; margin-top: 10px;">💊</div>', unsafe_allow_html=True) # Fallback to emoji
+
     with col_title:
-        st.title("Vancomycin TDM Assistant")
-        st.markdown('<p class="subtitle">Clinical pharmacokinetics made simple</p>', unsafe_allow_html=True)
+        st.title("TDM_AID by HTAR")
+        st.markdown('<p class="subtitle">VANCOMYCIN MODULE</p>', unsafe_allow_html=True)
+    # --- END OF UPDATES ---
 
     # --- SIDEBAR CONTENT ---
     with st.sidebar:
@@ -368,7 +393,7 @@ Patient Information:
 - Weight: {wt} kg
 - Sex: {'Female' if fem else 'Male'}
 - SCr: {scr_umol} µmol/L
-- Estimated CrCl: {crcl:.1f} mL/min (for maintenance dose reference)
+- Estimated CrCl: {f'{crcl:.1f}' if crcl is not None else 'N/A'} mL/min (for maintenance dose reference)
 
 Loading Dose Calculation:
 - Basis: 25 mg/kg
@@ -418,19 +443,23 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
         # --- TROUGH-ONLY RESULTS ---
         if submitted_to:
             # Input validation
-            if not all([dose_current_to, interval_current_to, trough_measured_to, dose_time_to, sample_time_to, crcl is not None]):
-                 st.error("Please ensure all inputs and patient details (for CrCl) are provided.")
+            if not all([dose_current_to, interval_current_to, trough_measured_to, dose_time_to, sample_time_to]):
+                 st.error("Please ensure all inputs are provided.")
+            elif crcl is None:
+                 st.error("Cannot perform analysis: CrCl could not be calculated. Check patient details in the sidebar.")
             else:
                 time_since_last_dose_h = hours_diff(dose_time_to, sample_time_to)
 
+                timing_valid_to = True
                 if time_since_last_dose_h <= 0:
                     st.error("Timing Error: Trough sample time must be after the last dose time.")
+                    timing_valid_to = False
                 elif time_since_last_dose_h >= interval_current_to:
                      st.warning(f"Timing Warning: Trough drawn {format_hours_minutes(time_since_last_dose_h)} after the dose, which is longer than the interval (q{interval_current_to}h). Ensure this timing is correct and represents a true trough.")
                      # Proceed with calculation but warn user
 
                 # Perform calculations only if timing is valid (or warning accepted)
-                if time_since_last_dose_h > 0:
+                if timing_valid_to:
                     with st.spinner("Analyzing trough level..."):
                         try:
                             # --- Trough-Only PK Calculations (Simplified Population Estimates) ---
@@ -537,7 +566,7 @@ Patient Information:
 - Weight: {wt} kg
 - Sex: {'Female' if fem else 'Male'}
 - SCr: {scr_umol} µmol/L
-- Estimated CrCl: {crcl:.1f} mL/min
+- Estimated CrCl: {f'{crcl:.1f}' if crcl is not None else 'N/A'} mL/min
 
 Current Regimen & Level:
 - Dose: {dose_current_to} mg q{interval_current_to}h
@@ -602,8 +631,10 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
         # --- PEAK & TROUGH RESULTS ---
         if submitted_pt:
             # Input validation
-            if not all([dose_levels_pt, interval_pt, peak_measured_pt, trough_measured_pt, infusion_start_time_pt, infusion_end_time_pt, peak_sample_time_pt, trough_sample_time_pt, crcl is not None]):
-                 st.error("Please ensure all inputs and patient details (for CrCl) are provided.")
+            if not all([dose_levels_pt, interval_pt, peak_measured_pt, trough_measured_pt, infusion_start_time_pt, infusion_end_time_pt, peak_sample_time_pt, trough_sample_time_pt]):
+                 st.error("Please ensure all inputs are provided.")
+            elif crcl is None:
+                 st.error("Cannot perform analysis: CrCl could not be calculated. Check patient details in the sidebar.")
             elif peak_measured_pt <= trough_measured_pt:
                  st.error("Input Error: Peak level must be higher than trough level.")
             else:
@@ -614,23 +645,23 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                 time_from_inf_end_to_trough = hours_diff(infusion_end_time_pt, trough_sample_time_pt) # T'
 
                 # Validate timings
-                timing_valid = True
+                timing_valid_pt = True
                 if infusion_duration_h <= 0:
                     st.error("Timing Error: Infusion end time must be after start time.")
-                    timing_valid = False
+                    timing_valid_pt = False
                 if time_from_inf_end_to_peak < 0:
                     st.error("Timing Error: Peak sample time must be after infusion end time.")
-                    timing_valid = False
+                    timing_valid_pt = False
                 if time_from_peak_to_trough <= 0:
                     st.error("Timing Error: Trough sample time must be after peak sample time.")
-                    timing_valid = False
+                    timing_valid_pt = False
                 # Check if trough is drawn reasonably before the next dose (e.g. within interval duration)
                 time_from_inf_start_to_trough = hours_diff(infusion_start_time_pt, trough_sample_time_pt)
                 if time_from_inf_start_to_trough >= interval_pt:
                      st.warning(f"Timing Warning: Trough drawn {format_hours_minutes(time_from_inf_start_to_trough)} after infusion start, which is >= interval (q{interval_pt}h). Ensure this is a true trough before the *next* dose.")
                      # Allow calculation but warn
 
-                if timing_valid:
+                if timing_valid_pt:
                     with st.spinner("Analyzing peak and trough levels..."):
                         try:
                             # --- Sawchuk-Zaske PK Calculations ---
@@ -645,18 +676,19 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                             cmax_extrap = peak_measured_pt * math.exp(ke_ind * time_from_inf_end_to_peak)
                             # Cmin_extrap = trough_measured_pt * math.exp(ke_ind * time_trough_to_next_dose_start) # Needs time to next dose
                             # Alternative Cmin calculation using Cmax_extrap and interval:
+                            # Ensure interval > infusion duration for Cmin calculation
+                            if interval_pt <= infusion_duration_h: raise ValueError("Dosing interval must be longer than infusion duration.")
                             cmin_extrap = cmax_extrap * math.exp(-ke_ind * (interval_pt - infusion_duration_h))
 
                             # Calculate Vd
+                            # Ensure infusion duration is positive before using in calculation
+                            if infusion_duration_h <= 0: raise ValueError("Infusion duration must be positive for Vd calculation.")
                             term1 = dose_levels_pt / (ke_ind * infusion_duration_h)
                             term2 = (1 - math.exp(-ke_ind * infusion_duration_h))
-                            term3 = (1 - math.exp(-ke_ind * interval_pt))
-                            if term3 == 0: raise ValueError("Calculation error: division by zero (exp(-Ke*tau) = 1). Check interval or Ke.")
-                            vd_ind = term1 * (term2 / (cmax_extrap - cmin_extrap * math.exp(-ke_ind * infusion_duration_h))) # More robust formula
-                            # Simpler Vd formula (less accurate if not at steady state):
-                            # vd_ind = (dose_levels_pt / infusion_duration_h / ke_ind) * \
-                            #          ((1 - math.exp(-ke_ind * infusion_duration_h)) / \
-                            #           (cmax_extrap - cmin_extrap * math.exp(-ke_ind * infusion_duration_h)))
+                            # Denominator term: (Cmax_extrap - Cmin_extrap * exp(-Ke * T_inf))
+                            denominator_vd = cmax_extrap - (cmin_extrap * math.exp(-ke_ind * infusion_duration_h))
+                            if denominator_vd == 0: raise ValueError("Calculation error: Vd denominator is zero.")
+                            vd_ind = term1 * (term2 / denominator_vd) # More robust formula
 
                             if vd_ind <= 0: raise ValueError("Calculated Vd is non-positive. Check inputs.")
 
@@ -745,7 +777,7 @@ Patient Information:
 - Weight: {wt} kg
 - Sex: {'Female' if fem else 'Male'}
 - SCr: {scr_umol} µmol/L
-- Estimated CrCl: {crcl:.1f} mL/min
+- Estimated CrCl: {f'{crcl:.1f}' if crcl is not None else 'N/A'} mL/min
 
 Regimen, Levels & Timing:
 - Dose: {dose_levels_pt} mg q{interval_pt}h
@@ -775,8 +807,10 @@ Disclaimer: For educational purposes only. Verify calculations and clinical corr
                                 mime="text/plain"
                             )
 
+                        except ValueError as ve: # Catch specific calculation errors
+                            st.error(f"Calculation Error: {ve}. Please check input values and timings.")
                         except Exception as e:
-                            st.error(f"An error occurred during calculation: {e}")
+                            st.error(f"An unexpected error occurred during calculation: {e}")
                             st.exception(e) # Show traceback for debugging
 
     # --- FOOTER ---
