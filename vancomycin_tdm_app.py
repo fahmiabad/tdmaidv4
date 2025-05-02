@@ -451,31 +451,32 @@ def render_interpretation(trough_status, trough_measured, auc_status, auc24, tha
         target_trough = "15-20"
         target_auc = ">600"
     
-    interpretation_html = f"""
+    # Create the HTML using string concatenation for better compatibility
+    interpretation_html = """
     <div class="interpretation-card">
         <div class="interpretation-section">
             <div class="interpretation-title">Assessment</div>
             <div class="interpretation-content">
-                The measured trough level ({trough_measured:.1f} mg/L) is {trough_status.lower()} for the selected therapeutic goal. 
-                The calculated AUC24 ({auc24:.1f} mg·h/L) is {auc_status.lower()}. 
-                The calculated half-life ({thalf:.1f} h) suggests the current interval (q{interval_h}h) is 
-                {'appropriate' if interval_h >= thalf * 1.5 else 'potentially too long'}.
+                The measured trough level (""" + f"{trough_measured:.1f}" + """ mg/L) is """ + trough_status.lower() + """ for the selected therapeutic goal. 
+                The calculated AUC24 (""" + f"{auc24:.1f}" + """ mg·h/L) is """ + auc_status.lower() + """. 
+                The calculated half-life (""" + f"{thalf:.1f}" + """ h) suggests the current interval (q""" + str(interval_h) + """h) is 
+                """ + ('appropriate' if interval_h >= thalf * 1.5 else 'potentially too long') + """.
             </div>
         </div>
         
         <div class="interpretation-section">
             <div class="interpretation-title">Recommendation</div>
             <div class="interpretation-content">
-                Based on the individual PK parameters, {rec_action} 
-                the dose to {new_dose} mg q{interval_h}h to achieve the target AUC of {target_auc} mg·h/L
-                and target trough of {target_trough} mg/L.
+                Based on the individual PK parameters, """ + rec_action + """ 
+                the dose to """ + str(new_dose) + """ mg q""" + str(interval_h) + """h to achieve the target AUC of """ + target_auc + """ mg·h/L
+                and target trough of """ + target_trough + """ mg/L.
             </div>
         </div>
         
         <div class="interpretation-section">
             <div class="interpretation-title">Rationale</div>
             <div class="interpretation-content">
-                The recommendation is based on the measured trough being {trough_status.lower()} and the calculated AUC being {auc_status.lower()}.
+                The recommendation is based on the measured trough being """ + trough_status.lower() + """ and the calculated AUC being """ + auc_status.lower() + """.
                 The individual PK parameters provide a more accurate assessment than population estimates.
             </div>
         </div>
