@@ -273,7 +273,7 @@ def main():
             st.markdown('<div style="font-size: 40px; margin-top: 10px;">💊</div>', unsafe_allow_html=True) # Fallback to emoji
 
     with col_title:
-        st.title("TDM_AID by HTAR")
+        st.title("TDM-AID by HTAR")
         st.markdown('<p class="subtitle">VANCOMYCIN MODULE</p>', unsafe_allow_html=True)
     # --- END OF UPDATES ---
 
