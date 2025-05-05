@@ -820,6 +820,8 @@ Disclaimer: For educational purposes only. Verify calculations and clinical corr
         Calculations are based on standard pharmacokinetic principles but may need adjustment based on individual patient factors and clinical context.
         Always consult with qualified healthcare professionals and local guidelines for clinical decision-making.
         *Reference: Basic Clinical Pharmacokinetics (6th Ed.), Clinical Pharmacokinetics Pharmacy Handbook (2nd Ed.), ASHP/IDSA Vancomycin Guidelines.*
+
+        Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com).
     """)
 
 if __name__ == "__main__":
