@@ -1,7 +1,8 @@
-streamlit
-pypdf
-langchain
-langchain-community # Add this
-langchain-openai   # Add this
-faiss-cpu         # or faiss-gpu
-tiktoken
+streamlit>=1.26.0
+numpy>=1.23.5
+pandas>=1.5.3
+pymupdf>=1.22.5  # For PDF processing (PyMuPDF)
+faiss-cpu>=1.7.4  # For vector search
+openai>=1.6.0    # For OpenAI API access
+python-dotenv>=1.0.0  # For environment variable handling
+matplotlib>=3.7.1  # For potential visualization needs
