@@ -263,7 +263,7 @@ def main():
     with col_logo:
         # Replace the URL with the path to your logo file or a direct URL
         # Example using a placeholder:
-        logo_url = "https://placehold.co/150x50/4F6BF2/FFFFFF?text=TDM-AID"
+        logo_url = "logo.png"
         # Example using a local file (place 'logo.png' in the same directory as your script):
         # logo_url = "logo.png"
         try:
