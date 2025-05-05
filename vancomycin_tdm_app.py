@@ -2,18 +2,31 @@
 import streamlit as st
 from datetime import datetime, timedelta, time, date
 import math
-import pandas as pd # Added for potential future data handling if needed
+import pandas as pd
+import os
+import json
+import fitz  # PyMuPDF for PDF processing
+import numpy as np
+import openai
+from pathlib import Path
+import faiss  # For vector search
+import re
+import tempfile
 
-# --- 1. SET PAGE CONFIG ---
+# --- 1. SET UP OPENAI API ---
+openai.api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+if not openai.api_key:
+    st.error("OpenAI API key not found. Please set it in Streamlit secrets or as an environment variable.")
+
+# --- 2. SET PAGE CONFIG ---
 st.set_page_config(
-    page_title="TDM-AID (Vancomycin)", # Updated page title
-    page_icon="💊", # Can be a URL to a favicon too
+    page_title="TDM-AID (Vancomycin) with RAG",
+    page_icon="💊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- 2. MINIMAL CUSTOM CSS (Optional - for fine-tuning) ---
-# Keep CSS minimal, focus on Streamlit's strengths
+# --- 3. MINIMAL CUSTOM CSS (Optional - for fine-tuning) ---
 st.markdown("""
 <style>
     /* Add slight padding to containers for visual separation */
@@ -65,11 +78,321 @@ st.markdown("""
        display: flex;
        align-items: center; /* Vertically center content in the first column */
     }
-
+    /* Style for the citation references */
+    .citation {
+        background-color: #f0f7ff;
+        border-left: 3px solid #4F6BF2;
+        padding: 10px;
+        margin: 10px 0;
+        font-size: 0.9em;
+    }
+    /* Style for the LLM reasoning section */
+    .reasoning {
+        background-color: #f9f9f9;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        padding: 15px;
+        margin-top: 15px;
+    }
+    .reasoning-title {
+        font-weight: bold;
+        margin-bottom: 10px;
+        color: #2A3C5D;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. HELPER FUNCTIONS ---
+# --- 4. RAG SYSTEM SETUP ---
+
+# Class to handle document processing
+class DocumentProcessor:
+    def __init__(self, pdf_path):
+        self.pdf_path = pdf_path
+        self.chunks = []
+        self.chunk_size = 1000
+        self.overlap = 200
+        
+    def extract_text_from_pdf(self):
+        try:
+            doc = fitz.open(self.pdf_path)
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            return text
+        except Exception as e:
+            st.error(f"Error extracting text from PDF: {e}")
+            return None
+    
+    def chunk_text(self, text):
+        if not text:
+            return []
+        
+        # Split text into sections based on headers
+        section_pattern = r'\n(?=[A-Z][A-Z\s]+(?:\n|:))'
+        sections = re.split(section_pattern, text)
+        
+        chunks = []
+        for section in sections:
+            if not section.strip():
+                continue
+                
+            # If section is already small enough, keep it as is
+            if len(section) <= self.chunk_size:
+                chunks.append(section.strip())
+            else:
+                # Split large sections into smaller chunks with overlap
+                words = section.split()
+                current_chunk = []
+                current_size = 0
+                
+                for word in words:
+                    current_chunk.append(word)
+                    current_size += len(word) + 1  # +1 for space
+                    
+                    if current_size >= self.chunk_size:
+                        chunks.append(" ".join(current_chunk).strip())
+                        # Keep last few words for overlap
+                        overlap_size = 0
+                        overlap_chunk = []
+                        for w in reversed(current_chunk):
+                            if overlap_size + len(w) + 1 <= self.overlap:
+                                overlap_chunk.insert(0, w)
+                                overlap_size += len(w) + 1
+                            else:
+                                break
+                        current_chunk = overlap_chunk
+                        current_size = overlap_size
+                
+                # Add the last chunk if not empty
+                if current_chunk:
+                    chunks.append(" ".join(current_chunk).strip())
+        
+        self.chunks = chunks
+        return chunks
+
+# Class to handle RAG operations
+class RAGSystem:
+    def __init__(self):
+        self.embeddings = None
+        self.chunks = None
+        self.index = None
+        self.is_initialized = False
+        self.temp_dir = None
+        
+    def embed_chunks(self, chunks):
+        if not chunks:
+            return None
+        
+        embeddings = []
+        try:
+            for i in range(0, len(chunks), 20):  # Process in batches of 20 to avoid API limits
+                batch = chunks[i:i+20]
+                
+                # Get embeddings for the batch using OpenAI API
+                response = openai.embeddings.create(
+                    model="text-embedding-ada-002",
+                    input=batch
+                )
+                
+                # Extract the embedding data from the response
+                batch_embeddings = [item.embedding for item in response.data]
+                embeddings.extend(batch_embeddings)
+                
+            self.embeddings = np.array(embeddings, dtype=np.float32)
+            return self.embeddings
+        except Exception as e:
+            st.error(f"Error generating embeddings: {e}")
+            return None
+    
+    def build_index(self):
+        if self.embeddings is None:
+            return False
+        
+        try:
+            # Initialize FAISS index
+            dimension = self.embeddings.shape[1]  # Get dimension from first embedding
+            self.index = faiss.IndexFlatL2(dimension)
+            self.index.add(self.embeddings)
+            return True
+        except Exception as e:
+            st.error(f"Error building search index: {e}")
+            return False
+    
+    def search(self, query, k=3):
+        if not self.is_initialized or self.index is None or self.chunks is None:
+            return []
+        
+        try:
+            # Get embedding for the query
+            query_response = openai.embeddings.create(
+                model="text-embedding-ada-002",
+                input=[query]
+            )
+            query_embedding = np.array([query_response.data[0].embedding], dtype=np.float32)
+            
+            # Search the index
+            distances, indices = self.index.search(query_embedding, k)
+            
+            # Return the relevant chunks
+            results = []
+            for i, idx in enumerate(indices[0]):
+                if idx >= 0 and idx < len(self.chunks):  # Ensure index is valid
+                    results.append({
+                        "text": self.chunks[idx],
+                        "score": float(distances[0][i])
+                    })
+            
+            return results
+        except Exception as e:
+            st.error(f"Error during search: {e}")
+            return []
+    
+    def initialize_from_pdf(self, pdf_path):
+        try:
+            # Create temporary directory if it doesn't exist
+            if not self.temp_dir:
+                self.temp_dir = tempfile.TemporaryDirectory()
+            
+            # Process the PDF
+            processor = DocumentProcessor(pdf_path)
+            text = processor.extract_text_from_pdf()
+            if text:
+                self.chunks = processor.chunk_text(text)
+                self.embeddings = self.embed_chunks(self.chunks)
+                success = self.build_index()
+                self.is_initialized = success
+                return success
+            return False
+        except Exception as e:
+            st.error(f"Error initializing RAG system: {e}")
+            return False
+    
+    def initialize_from_saved(self, chunks_path, embeddings_path):
+        try:
+            # Load chunks and embeddings from saved files
+            with open(chunks_path, 'r') as f:
+                self.chunks = json.load(f)
+            
+            self.embeddings = np.load(embeddings_path)
+            
+            # Build the index
+            success = self.build_index()
+            self.is_initialized = success
+            return success
+        except Exception as e:
+            st.error(f"Error loading saved RAG data: {e}")
+            return False
+    
+    def save_data(self, chunks_path, embeddings_path):
+        try:
+            # Save chunks as JSON
+            with open(chunks_path, 'w') as f:
+                json.dump(self.chunks, f)
+            
+            # Save embeddings as numpy array
+            np.save(embeddings_path, self.embeddings)
+            
+            return True
+        except Exception as e:
+            st.error(f"Error saving RAG data: {e}")
+            return False
+    
+    def cleanup(self):
+        if self.temp_dir:
+            self.temp_dir.cleanup()
+
+# LLM Reasoning component
+class LLMReasoner:
+    def __init__(self):
+        self.model = "gpt-4o"  # Use GPT-4o for best reasoning capabilities
+    
+    def generate_reasoning(self, patient_data, calculation_results, relevant_guidelines):
+        try:
+            # Combine relevant guidelines into context
+            guideline_context = "\n\n".join([item["text"] for item in relevant_guidelines])
+            
+            # Format patient data for prompt
+            patient_info = f"""
+Patient Information:
+- Age: {patient_data.get('age', 'N/A')} years
+- Weight: {patient_data.get('weight', 'N/A')} kg
+- Sex: {patient_data.get('sex', 'N/A')}
+- SCr: {patient_data.get('scr', 'N/A')} µmol/L
+- CrCl: {patient_data.get('crcl', 'N/A')} mL/min
+- Clinical notes: {patient_data.get('clinical_notes', 'N/A')}
+            """
+            
+            # Format calculation results for prompt
+            calc_info = ""
+            if calculation_results:
+                calc_info = "Calculation Results:\n"
+                for key, value in calculation_results.items():
+                    calc_info += f"- {key}: {value}\n"
+            
+            # Create prompt for the LLM
+            prompt = f"""You are a clinical pharmacist specialist in antimicrobial stewardship and pharmacokinetics. 
+You are analyzing a vancomycin dosing regimen for a patient. Please provide your expert reasoning on the proposed dosing regimen.
+
+{patient_info}
+
+{calc_info}
+
+Based on the relevant clinical guidelines, provide your reasoning:
+
+{guideline_context}
+
+Please provide:
+1. An assessment of the current dosing and levels
+2. Your reasoning on whether the calculated dose is appropriate
+3. Any factors that might necessitate dose adjustment beyond the basic calculations
+4. Specific rationale tied to the guidelines
+5. Any monitoring recommendations
+
+Format your response as a concise clinical consultation note. Include specific citations to the guidelines when making recommendations.
+"""
+            
+            # Call OpenAI API for reasoning
+            response = openai.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": "You are a clinical pharmacist specialist providing expert consultation on vancomycin dosing."},
+                          {"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1500
+            )
+            
+            return response.choices[0].message.content
+        
+        except Exception as e:
+            st.error(f"Error generating LLM reasoning: {e}")
+            return f"Unable to generate reasoning due to an error: {str(e)}"
+
+# --- 5. INITIALIZE THE RAG SYSTEM ---
+@st.cache_resource
+def get_rag_system():
+    rag = RAGSystem()
+    
+    # Check if we have saved data
+    base_path = Path(".")
+    chunks_path = base_path / "vanco_chunks.json"
+    embeddings_path = base_path / "vanco_embeddings.npy"
+    
+    if chunks_path.exists() and embeddings_path.exists():
+        if rag.initialize_from_saved(chunks_path, embeddings_path):
+            return rag
+    
+    # If no saved data or loading failed, process the PDF
+    pdf_path = base_path / "Vanco.pdf"
+    if pdf_path.exists():
+        if rag.initialize_from_pdf(pdf_path):
+            # Save the data for future use
+            rag.save_data(chunks_path, embeddings_path)
+            return rag
+    
+    # If PDF doesn't exist, show error
+    st.error("Vancomycin guidelines PDF not found. Please make sure 'Vanco.pdf' is in the app directory.")
+    return rag
+
+# --- 6. HELPER FUNCTIONS ---
 
 # Calculate the time difference in hours
 def hours_diff(start, end):
@@ -167,31 +490,102 @@ def display_level_indicator(label, value, target_range, unit):
         delta_str = "Target Met"
         # No delta color change needed for within target
     elif status == "BELOW TARGET":
-        # --- UPDATED: Use downward arrow ---
         delta_str = f"↓ {lower}"
-        # --- END OF UPDATE ---
         delta_color = "inverse" # Red for below target
     elif status == "ABOVE TARGET" and upper is not None:
-        # --- UPDATED: Use upward arrow ---
         delta_str = f"↑ {upper}"
-        # --- END OF UPDATE ---
         delta_color = "inverse" # Red for above target
     elif status == "ABOVE TARGET" and upper is None: # Handle > target case
-        # --- UPDATED: Use upward arrow ---
         delta_str = f"↑ {lower}" # Indicate it's above the minimum threshold
-        # --- END OF UPDATE ---
-        # Optionally keep delta_color 'off' or set to 'normal' (green) if exceeding is okay
         delta_color = "normal"
 
-
     st.metric(label=f"{label} ({unit})", value=value_str, delta=delta_str, delta_color=delta_color)
-    # Optionally add a visual progress bar (simple version)
-    # progress_val = 0
-    # if lower > 0: # Basic scaling attempt
-    #     max_display = upper * 1.2 if upper else lower * 2 # Arbitrary max for display
-    #     progress_val = min(1.0, value / max_display)
-    # st.progress(progress_val)
 
+# Function to formulate RAG query based on patient data and calculation results
+def formulate_rag_query(patient_data, calculation_results, target_desc):
+    """Creates a query for the RAG system based on patient parameters and calculation results."""
+    query_parts = []
+    
+    # Add patient-specific information to query
+    if patient_data.get('crcl'):
+        if patient_data['crcl'] < 30:
+            query_parts.append("vancomycin dosing severe renal impairment")
+        elif patient_data['crcl'] < 60:
+            query_parts.append("vancomycin dosing moderate renal impairment")
+    
+    # Add calculation-specific information
+    if calculation_results:
+        if 'AUC Status' in calculation_results:
+            if calculation_results['AUC Status'] == "BELOW TARGET":
+                query_parts.append("vancomycin AUC below target recommendations")
+            elif calculation_results['AUC Status'] == "ABOVE TARGET":
+                query_parts.append("vancomycin AUC above target toxicity")
+            else:
+                query_parts.append("vancomycin AUC within target monitoring")
+        
+        if 'Trough Status' in calculation_results:
+            if calculation_results['Trough Status'] == "BELOW TARGET":
+                query_parts.append("vancomycin trough below target recommendations")
+            elif calculation_results['Trough Status'] == "ABOVE TARGET":
+                query_parts.append("vancomycin trough above target toxicity")
+            else:
+                query_parts.append("vancomycin trough within target monitoring")
+    
+    # Add target-related information
+    if "Empirical" in target_desc:
+        query_parts.append("vancomycin empirical dosing guidelines AUC 400-600")
+    elif "Definitive/Severe" in target_desc:
+        query_parts.append("vancomycin severe infection dosing guidelines AUC greater than 600")
+    
+    # Add clinical context if provided
+    if patient_data.get('clinical_notes') and len(patient_data['clinical_notes']) > 10:
+        # Extract keywords from clinical notes
+        notes = patient_data['clinical_notes'].lower()
+        if "meningitis" in notes:
+            query_parts.append("vancomycin CNS infection meningitis")
+        if "endocarditis" in notes:
+            query_parts.append("vancomycin endocarditis dosing")
+        if "pneumonia" in notes:
+            query_parts.append("vancomycin pneumonia dosing")
+        if "dialysis" in notes or "hd" in notes or "crrt" in notes:
+            query_parts.append("vancomycin renal replacement therapy dialysis")
+        if "icu" in notes or "sepsis" in notes or "septic" in notes:
+            query_parts.append("vancomycin critical care sepsis")
+        if "obesity" in notes or "obese" in notes:
+            query_parts.append("vancomycin dosing obesity")
+    
+    # Combine query parts, ensuring we're not repeating terms
+    unique_parts = list(set(query_parts))
+    
+    # If no specific parts, use a general query
+    if not unique_parts:
+        unique_parts = ["vancomycin dosing guidelines AUC monitoring recommendations"]
+    
+    # Combine parts into a single query string
+    return " ".join(unique_parts)
+
+# Display RAG results in the UI
+def display_rag_results(results):
+    """Displays the retrieved guideline sections."""
+    if not results:
+        st.info("No relevant guideline sections found.")
+        return
+    
+    st.subheader("Relevant Guideline Sections")
+    
+    for i, result in enumerate(results):
+        with st.expander(f"Guideline Section {i+1}"):
+            st.markdown(f'<div class="citation">{result["text"]}</div>', unsafe_allow_html=True)
+
+# Render LLM reasoning in the UI
+def display_llm_reasoning(reasoning_text):
+    """Displays the LLM reasoning with appropriate formatting."""
+    if not reasoning_text:
+        st.info("No expert reasoning available.")
+        return
+    
+    st.subheader("Expert Pharmacokinetic Analysis")
+    st.markdown(f'<div class="reasoning"><p class="reasoning-title">Clinical Pharmacist Assessment</p>{reasoning_text}</div>', unsafe_allow_html=True)
 
 # Render interpretation using Streamlit components
 def render_interpretation_st(trough_status, trough_measured, auc_status, auc24, thalf, interval_h, new_dose, target_desc, pk_method):
@@ -255,27 +649,28 @@ def render_interpretation_st(trough_status, trough_measured, auc_status, auc24, 
         """
         st.markdown(followup_text)
 
-# --- 4. MAIN APP STRUCTURE ---
+# --- 7. MAIN APP STRUCTURE ---
 def main():
+    # Initialize RAG system
+    rag_system = get_rag_system()
+    llm_reasoner = LLMReasoner()
+    
     # --- HEADER ---
-    # --- UPDATED: Use st.image for logo ---
-    col_logo, col_title = st.columns([1, 5]) # Adjust column ratio as needed
+    col_logo, col_title = st.columns([1, 5])
     with col_logo:
-        # Replace the URL with the path to your logo file or a direct URL
-        # Example using a placeholder:
         logo_url = "logo.png"
-        # Example using a local file (place 'logo.png' in the same directory as your script):
-        # logo_url = "logo.png"
         try:
-            st.image(logo_url, width=150) # Adjust width as needed
+            st.image(logo_url, width=150)
         except Exception as e:
-            st.error(f"Could not load logo: {e}") # Handle file not found or URL error
-            st.markdown('<div style="font-size: 40px; margin-top: 10px;">💊</div>', unsafe_allow_html=True) # Fallback to emoji
+            st.markdown('<div style="font-size: 40px; margin-top: 10px;">💊</div>', unsafe_allow_html=True)
 
     with col_title:
         st.title("TDM-AID by HTAR")
-        st.markdown('<p class="subtitle">VANCOMYCIN MODULE</p>', unsafe_allow_html=True)
-    # --- END OF UPDATES ---
+        st.markdown('<p class="subtitle">VANCOMYCIN MODULE WITH RAG + LLM REASONING</p>', unsafe_allow_html=True)
+
+    # Check if RAG system is initialized
+    if not rag_system.is_initialized:
+        st.warning("RAG system not initialized. Some advanced features may not be available.")
 
     # --- SIDEBAR CONTENT ---
     with st.sidebar:
@@ -339,11 +734,16 @@ def main():
             st.metric(label="Estimated CrCl (mL/min)", value=f"{crcl:.1f}")
         else:
             st.warning("Cannot calculate CrCl. Check Age, Weight, SCr.")
-
-
+            
+        # Toggle for LLM features
+        st.divider()
+        st.subheader("Advanced Features")
+        use_rag = st.toggle("Use RAG Guidelines", value=True, help="Retrieve relevant guideline sections for this case")
+        use_llm = st.toggle("Use LLM Reasoning", value=True, help="Generate expert reasoning using GPT-4o")
+        
     # --- MAIN AREA TABS ---
     tab1, tab2, tab3 = st.tabs(["Initial Dose", "Trough-Only Analysis", "Peak & Trough Analysis"])
-
+    
     # --- INITIAL DOSE TAB ---
     with tab1:
         st.header("Initial Loading Dose Calculator")
@@ -381,6 +781,35 @@ def main():
                 st.caption(f"Calculated based on 25 mg/kg for {wt} kg weight, rounded to nearest 250 mg.")
                 if loading_dose_final >= max_loading_dose:
                      st.warning(f"Loading dose capped at {max_loading_dose} mg.")
+                
+                # Collect data for RAG and LLM
+                patient_data = {
+                    'age': age,
+                    'weight': wt,
+                    'sex': 'Female' if fem else 'Male',
+                    'scr': scr_umol,
+                    'crcl': crcl,
+                    'clinical_notes': clinical_notes
+                }
+                
+                calculation_results = {
+                    'Calculation Method': 'Initial Loading Dose',
+                    'Calculated Dose (raw)': f"{loading_dose_raw:.1f} mg",
+                    'Rounded Dose': f"{loading_dose_rounded} mg",
+                    'Final Recommended Loading Dose': f"{loading_dose_final} mg (one-time)"
+                }
+                
+                # Use RAG system to retrieve relevant guidelines if enabled
+                if use_rag and rag_system.is_initialized:
+                    query = f"vancomycin loading dose guidelines {wt}kg patient CrCl {crcl:.1f} {clinical_notes}"
+                    results = rag_system.search(query, k=3)
+                    if results:
+                        display_rag_results(results)
+                    
+                    # Use LLM reasoning if enabled
+                    if use_llm:
+                        reasoning_text = llm_reasoner.generate_reasoning(patient_data, calculation_results, results)
+                        display_llm_reasoning(reasoning_text)
 
                 # Prepare data for download
                 report_data = f"""Vancomycin Initial Loading Dose Report
@@ -412,8 +841,7 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                     file_name=f"vanco_loading_dose_{pid if pid else 'report'}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                     mime="text/plain"
                 )
-
-
+                
     # --- TROUGH-ONLY TAB ---
     with tab2:
         st.header("Trough-Only Analysis")
@@ -554,6 +982,28 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                                 target_desc=target_level_desc,
                                 pk_method="Trough-Only (Population Estimate)"
                             )
+                            
+                            # Collect patient data for RAG and LLM
+                            patient_data = {
+                                'age': age,
+                                'weight': wt,
+                                'sex': 'Female' if fem else 'Male',
+                                'scr': scr_umol,
+                                'crcl': crcl,
+                                'clinical_notes': clinical_notes
+                            }
+                            
+                            # Use RAG system to retrieve relevant guidelines if enabled
+                            if use_rag and rag_system.is_initialized:
+                                query = formulate_rag_query(patient_data, pk_results, target_level_desc)
+                                results = rag_system.search(query, k=3)
+                                if results:
+                                    display_rag_results(results)
+                                
+                                # Use LLM reasoning if enabled
+                                if use_llm:
+                                    reasoning_text = llm_reasoner.generate_reasoning(patient_data, pk_results, results)
+                                    display_llm_reasoning(reasoning_text)
 
                             # Download Report
                             report_data = f"""Vancomycin TDM Report (Trough-Only)
@@ -596,8 +1046,7 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                         except Exception as e:
                             st.error(f"An error occurred during calculation: {e}")
                             st.exception(e) # Show traceback for debugging
-
-
+                            
     # --- PEAK & TROUGH TAB ---
     with tab3:
         st.header("Peak & Trough Analysis")
@@ -765,6 +1214,28 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 target_desc=target_level_desc,
                                 pk_method="Peak & Trough (Individualized)"
                             )
+                            
+                            # Collect patient data for RAG and LLM
+                            patient_data = {
+                                'age': age,
+                                'weight': wt,
+                                'sex': 'Female' if fem else 'Male',
+                                'scr': scr_umol,
+                                'crcl': crcl,
+                                'clinical_notes': clinical_notes
+                            }
+                            
+                            # Use RAG system to retrieve relevant guidelines if enabled
+                            if use_rag and rag_system.is_initialized:
+                                query = formulate_rag_query(patient_data, pk_results, target_level_desc)
+                                results = rag_system.search(query, k=3)
+                                if results:
+                                    display_rag_results(results)
+                                
+                                # Use LLM reasoning if enabled
+                                if use_llm:
+                                    reasoning_text = llm_reasoner.generate_reasoning(patient_data, pk_results, results)
+                                    display_llm_reasoning(reasoning_text)
 
                             # Download Report
                             report_data = f"""Vancomycin TDM Report (Peak & Trough)
@@ -812,7 +1283,7 @@ Disclaimer: For educational purposes only. Verify calculations and clinical corr
                         except Exception as e:
                             st.error(f"An unexpected error occurred during calculation: {e}")
                             st.exception(e) # Show traceback for debugging
-
+                            
     # --- FOOTER ---
     st.markdown("---")
     st.caption("""
@@ -821,8 +1292,14 @@ Disclaimer: For educational purposes only. Verify calculations and clinical corr
         Always consult with qualified healthcare professionals and local guidelines for clinical decision-making.
         *Reference: Basic Clinical Pharmacokinetics (6th Ed.), Clinical Pharmacokinetics Pharmacy Handbook (2nd Ed.), ASHP/IDSA Vancomycin Guidelines.*
 
-        Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com).
+        Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com), Enhanced with RAG and LLM reasoning.
     """)
+    
+    # Cleanup RAG system when the app is closed
+    try:
+        rag_system.cleanup()
+    except:
+        pass
 
 if __name__ == "__main__":
     main()
