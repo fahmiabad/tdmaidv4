@@ -1,5 +1,3 @@
-Here you go — full file with the fixes applied (regex, f-strings, and nicer AUC text in reports).
-
 ```python
 # -*- coding: utf-8 -*-
 # TDM-AID (Vancomycin) with RAG + LLM Reasoning
