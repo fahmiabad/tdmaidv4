@@ -245,7 +245,7 @@ class RAGSystem:
 
 class LLMReasoner:
     def __init__(self):
-        self.model = "gpt-5"  # keep your original setting
+        self.model = "gpt-4o"  # keep your original setting
 
     def generate_reasoning(self, patient_data, calculation_results, relevant_guidelines):
         try:
