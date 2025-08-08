@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # TDM-AID (Vancomycin) with RAG + LLM Reasoning
-# - Weight-choice rules for Cockcroft–Gault (TBW/IBW/AdjBW)
-# - Infusion-time guidance (≥60 min and ≤10 mg/min) + auto-suggest end time
+# - Weight-choice rules for Cockcroft-Gault (TBW/IBW/AdjBW)
+# - Infusion-time guidance (>=60 min and <=10 mg/min) + auto-suggest end time
 # - Embeddings upgraded to text-embedding-3-small with robust fallback
 #
-# NOTE: This app preserves your calculation methods (pop-PK trough-only & Sawchuk–Zaske P+T).
+# NOTE: This app preserves your calculation methods (pop-PK trough-only & Sawchuk-Zaske P+T).
 #       Validate locally against MOH Clinical PK Handbook examples before production.
 
 import os
@@ -371,9 +371,9 @@ def choose_weight_for_cg(tbw_kg: float, ibw_kg: float):
     if tbw_kg < ibw_kg:
         return tbw_kg, "TBW (<IBW)"
     elif ratio >= 1.2:
-        return adjbw_func(ibw_kg, tbw_kg), "AdjBW (≥120% IBW)"
+        return adjbw_func(ibw_kg, tbw_kg), "AdjBW (>=120% IBW)"
     else:
-        return ibw_kg, "IBW (100–120%)"
+        return ibw_kg, "IBW (100-120%)"
 
 def calculate_crcl_cg(age, tbw_kg, scr_umol, is_female, height_cm):
     if not all([age, tbw_kg, scr_umol]) or age <= 0 or tbw_kg <= 0 or scr_umol <= 0:
@@ -557,20 +557,20 @@ The adjustment is based on the calculated pharmacokinetic parameters derived fro
 """
         st.markdown(followup_text)
 
-# Infusion guidance helpers (≥60 min and ≤10 mg/min), with auto-suggest support
+# Infusion guidance helpers (>=60 min and <=10 mg/min), with auto-suggest support
 def infusion_guidance(dose_mg: float):
     """
     Returns (message, minutes_by_rate_cap, minutes_recommended).
-    Policy: infuse ≥60 min AND do not exceed 10 mg/min.
+    Policy: infuse >=60 min AND do not exceed 10 mg/min.
     => recommended minutes = max(60, ceil(dose_mg / 10))
     """
     if not dose_mg or dose_mg <= 0:
         return ("", 0, 60)
     minutes_by_rate_cap = math.ceil(dose_mg / 10.0)
     minutes_recommended = max(60, minutes_by_rate_cap)
-    msg = (f"Infusion guidance: infuse over **≥60 minutes** and **not faster than 10 mg/min**. "
-           f"For {int(dose_mg)} mg, 10 mg/min ≈ **{minutes_by_rate_cap} min**; "
-           f"recommend **≥{minutes_recommended} min**.")
+    msg = (f"Infusion guidance: infuse over >=60 minutes and not faster than 10 mg/min. "
+           f"For {int(dose_mg)} mg, 10 mg/min ~ {minutes_by_rate_cap} min; "
+           f"recommend >= {minutes_recommended} min.")
     return msg, minutes_by_rate_cap, minutes_recommended
 
 # --- 7. MAIN APP ---
@@ -625,7 +625,7 @@ def main():
         if crcl is not None:
             st.metric(label="Estimated CrCl (mL/min)", value=f"{crcl:.1f}")
             st.caption(
-                f"CG using **{crcl_data['weight_method']}**: {crcl_data['weight_used']:.1f} kg"
+                f"CG using {crcl_data['weight_method']}: {crcl_data['weight_used']:.1f} kg"
                 + (f" | IBW {crcl_data['ibw']:.1f} kg" if crcl_data['ibw'] is not None else "")
                 + (f" | AdjBW {crcl_data['adjbw']:.1f} kg" if crcl_data['adjbw'] is not None else "")
             )
@@ -638,8 +638,8 @@ def main():
             target_level_desc = st.selectbox(
                 "Select target level:",
                 options=[
-                    "Empirical (Target AUC₂₄ 400-600 mg·h/L; Trough ~10-15 mg/L)",
-                    "Definitive/Severe (Target AUC₂₄ >600 mg·h/L; Trough ~15-20 mg/L)"
+                    "Empirical (Target AUC24 400-600 mg·h/L; Trough ~10-15 mg/L)",
+                    "Definitive/Severe (Target AUC24 >600 mg·h/L; Trough ~15-20 mg/L)"
                 ],
                 index=0,
                 label_visibility="collapsed",
@@ -679,10 +679,10 @@ def main():
         with col1:
             st.info("""
 **Calculation Method:**
-- Uses weight-based dosing (typically 20–35 mg/kg, commonly 25 mg/kg).
+- Uses weight-based dosing (typically 20-35 mg/kg, commonly 25 mg/kg).
 - Aims to rapidly achieve therapeutic concentrations.
 - Dose is rounded to the nearest 250 mg increment.
-- **Note:** Renal function primarily guides the *maintenance* dose interval, not the loading dose.
+- Note: Renal function primarily guides the maintenance dose interval, not the loading dose.
 """)
         with col2:
             st.markdown('<div style="height: 50px;"></div>', unsafe_allow_html=True)
@@ -697,7 +697,7 @@ def main():
                 max_loading_dose = 3000
                 loading_dose_final = min(loading_dose_rounded, max_loading_dose)
 
-                st.success(f"**Recommended Initial Loading Dose: {loading_dose_final} mg** (one-time)")
+                st.success(f"Recommended Initial Loading Dose: {loading_dose_final} mg (one-time)")
                 st.caption(f"Calculated based on 25 mg/kg for {wt} kg weight, rounded to nearest 250 mg.")
                 if loading_dose_final >= max_loading_dose:
                     st.warning(f"Loading dose capped at {max_loading_dose} mg.")
@@ -718,7 +718,6 @@ def main():
                     'Final Recommended Loading Dose': f"{loading_dose_final} mg (one-time)"
                 }
                 if use_rag and rag_system.is_initialized:
-                    # FIXED: illegal f-string expression
                     crcl_str = f"{crcl:.1f}" if crcl is not None else "NA"
                     query = f"vancomycin loading dose guidelines {wt}kg patient CrCl {crcl_str} {clinical_notes}"
                     results = rag_system.search(query, k=3)
@@ -728,12 +727,11 @@ def main():
                         reasoning_text = llm_reasoner.generate_reasoning(patient_data, calculation_results, results)
                         display_llm_reasoning(reasoning_text)
 
-                # ---- precompute strings for report ----
+                # Precompute strings for report
                 weight_used_str = f"{crcl_data['weight_used']:.1f} kg" if crcl_data['weight_used'] is not None else "N/A"
                 ibw_str = f"{crcl_data['ibw']:.1f} kg" if crcl_data['ibw'] is not None else "N/A"
                 adjbw_str = f"{crcl_data['adjbw']:.1f} kg" if crcl_data['adjbw'] is not None else "N/A"
 
-                # Report
                 report_data = f"""Vancomycin Initial Loading Dose Report
 Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
@@ -755,7 +753,7 @@ Loading Dose Calculation:
 - Rounded Dose: {loading_dose_rounded} mg
 - Final Recommended Loading Dose: {loading_dose_final} mg (one-time)
 
-Infusion Guidance: Infuse over ≥60 minutes; do not exceed 10 mg/min (≈ {minutes_rec} minutes recommended for this dose)
+Infusion Guidance: Infuse over >=60 minutes; do not exceed 10 mg/min (~ {minutes_rec} minutes recommended for this dose)
 
 Clinical Notes:
 {clinical_notes if clinical_notes else 'N/A'}
@@ -763,7 +761,7 @@ Clinical Notes:
 Disclaimer: For educational purposes only. Verify with clinical guidelines.
 """
                 st.download_button(
-                    label="📄 Download Loading Dose Report",
+                    label="Download Loading Dose Report",
                     data=report_data,
                     file_name=f"vanco_loading_dose_{pid if pid else 'report'}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                     mime="text/plain"
@@ -792,9 +790,9 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                 dose_time_to = st.time_input("Last Dose Given At", value=time(8, 0), step=timedelta(minutes=15), key="to_dose_time")
                 sample_time_to = st.time_input("Trough Level Drawn At", value=time(19, 30), step=timedelta(minutes=15), key="to_sample_time")
 
-                # Optional info: suggested infusion end for current dose
+                # Suggested infusion end for current dose
                 _, _, minutes_rec_to = infusion_guidance(dose_current_to)
-                st.caption(f"Suggested infusion end (info): {add_minutes_to_time(dose_time_to, minutes_rec_to).strftime('%H:%M')} (≥60 min and ≤10 mg/min).")
+                st.caption(f"Suggested infusion end (info): {add_minutes_to_time(dose_time_to, minutes_rec_to).strftime('%H:%M')} (>=60 min and <=10 mg/min).")
 
             submitted_to = st.form_submit_button("Run Trough Analysis")
 
@@ -816,7 +814,7 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                     with st.spinner("Analyzing trough level..."):
                         try:
                             # Population estimates
-                            vd_est = 0.7 * wt  # keep TBW as per your method
+                            vd_est = 0.7 * wt  # TBW
                             ke_est = 0.00083 * crcl + 0.0044
                             if ke_est <= 0:
                                 ke_est = 0.001
@@ -838,10 +836,10 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                                 'Calculation Method': 'Trough-Only (Population Estimate)',
                                 'Est. CrCl (mL/min)': f"{crcl:.1f}",
                                 'Est. Vd (L)': f"{vd_est:.1f}",
-                                'Est. Ke (h⁻¹)': f"{ke_est:.4f}",
+                                'Est. Ke (h^-1)': f"{ke_est:.4f}",
                                 'Est. CL (L/h)': f"{cl_est:.2f}",
-                                'Est. t½ (h)': f"{thalf_est:.1f}",
-                                'Est. AUC₂₄ (mg·h/L)': f"{auc24_est:.1f}",
+                                'Est. t1/2 (h)': f"{thalf_est:.1f}",
+                                'Est. AUC24 (mg·h/L)': f"{auc24_est:.1f}",
                                 'Measured Trough (mg/L)': f"{trough_measured_to:.1f}",
                                 'Trough Status': trough_status,
                                 'AUC Status': auc_status,
@@ -849,13 +847,13 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                             }
 
                             st.subheader("Analysis Results")
-                            st.info(f"Trough drawn **{format_hours_minutes(time_since_last_dose_h)}** after the dose (Interval: q{interval_current_to}h). Calculations use population estimates based on patient demographics.")
+                            st.info(f"Trough drawn {format_hours_minutes(time_since_last_dose_h)} after the dose (Interval: q{interval_current_to}h). Calculations use population estimates based on patient demographics.")
 
                             res_col1, res_col2 = st.columns(2)
                             with res_col1:
                                 st.subheader("Target Status")
-                                display_level_indicator("Measured Trough", trough_measured_to, target_trough_range, "mg/L")
-                                display_level_indicator("Estimated AUC₂₄", auc24_est, target_auc_range, "mg·h/L")
+                                display_level_indicator("Measured Trough", trough_measured_to, target_trrough_range if False else target_trough_range, "mg/L")
+                                display_level_indicator("Estimated AUC24", auc24_est, target_auc_range, "mg·h/L")
                             with res_col2:
                                 st.subheader("Recommendation")
                                 st.markdown(f'<p class="recommendation-dose">{new_dose_rounded} mg q{interval_current_to}h</p>', unsafe_allow_html=True)
@@ -871,15 +869,15 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                                 st.metric("Est. Vd (L)", f"{vd_est:.1f}")
                                 st.metric("Est. CL (L/h)", f"{cl_est:.2f}")
                             with pk_col2:
-                                st.metric("Est. Ke (h⁻¹)", f"{ke_est:.4f}")
-                                st.metric("Est. t½ (h)", f"{thalf_est:.1f}")
+                                st.metric("Est. Ke (h^-1)", f"{ke_est:.4f}")
+                                st.metric("Est. t1/2 (h)", f"{thalf_est:.1f}")
                             with pk_col3:
-                                st.metric("Est. AUC₂₄ (mg·h/L)", f"{auc24_est:.1f}")
+                                st.metric("Est. AUC24 (mg·h/L)", f"{auc24_est:.1f}")
                                 st.metric("CrCl (mL/min)", f"{crcl:.1f}")
 
                             render_interpretation_st(
                                 trough_status=trough_status,
-                                trough_measured=trrough_measured_to if False else trough_measured_to,  # noop safety
+                                trough_measured=trough_measured_to,
                                 auc_status=auc_status,
                                 auc24=auc24_est,
                                 thalf=thalf_est,
@@ -903,12 +901,11 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                                     reasoning_text = llm_reasoner.generate_reasoning(patient_data, pk_results, results)
                                     display_llm_reasoning(reasoning_text)
 
-                            # ---- precompute strings for report ----
+                            # Precompute strings for report
                             weight_used_str = f"{crcl_data['weight_used']:.1f} kg" if crcl_data['weight_used'] is not None else "N/A"
                             ibw_str = f"{crcl_data['ibw']:.1f} kg" if crcl_data['ibw'] is not None else "N/A"
                             adjbw_str = f"{crcl_data['adjbw']:.1f} kg" if crcl_data['adjbw'] is not None else "N/A"
-                            target_auc_text = (f"{target_auc_range[0]}–{target_auc_range[1]}"
-                                               if target_auc_range[1] is not None else f"≥{target_auc_range[0]}")
+                            target_auc_text = (f"{target_auc_range[0]}-{target_auc_range[1]}" if target_auc_range[1] is not None else f">= {target_auc_range[0]}")
 
                             report_data = f"""Vancomycin TDM Report (Trough-Only)
 Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -933,12 +930,12 @@ Current Regimen & Level:
 
 Target: {target_level_desc}
 - Target Trough: {target_trough_range[0]}-{target_trough_range[1]} mg/L
-- Target AUC₂₄: {target_auc_text} mg·h/L
+- Target AUC24: {target_auc_text} mg·h/L
 
 Analysis Results (Population Estimates):
 {pd.Series(pk_results).to_string()}
 
-Infusion Guidance (suggested new dose): Infuse over ≥60 minutes; do not exceed 10 mg/min (≈ {minutes_rec_new} minutes recommended)
+Infusion Guidance (suggested new dose): Infuse over >=60 minutes; do not exceed 10 mg/min (~ {minutes_rec_new} minutes recommended)
 
 Clinical Notes:
 {clinical_notes if clinical_notes else 'N/A'}
@@ -946,7 +943,7 @@ Clinical Notes:
 Disclaimer: Trough-only analysis uses population estimates and has limitations. Individual PK may vary. Clinical correlation required.
 """
                             st.download_button(
-                                label="📄 Download Trough Analysis Report",
+                                label="Download Trough Analysis Report",
                                 data=report_data,
                                 file_name=f"vanco_trough_analysis_{pid if pid else 'report'}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                                 mime="text/plain"
@@ -959,7 +956,7 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
     # --- PEAK & TROUGH ---
     with tab3:
         st.header("Peak & Trough Analysis")
-        st.caption("Calculate individual PK parameters using paired peak and trough levels (Sawchuk–Zaske method).")
+        st.caption("Calculate individual PK parameters using paired peak and trough levels (Sawchuk-Zaske method).")
 
         with st.form(key="peak_trough_form"):
             st.subheader("Regimen & Levels")
@@ -990,11 +987,11 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
             suggested_end_pt = add_minutes_to_time(infusion_start_time_pt, minutes_rec_cur)
 
             auto_set_end = st.checkbox(
-                "Auto-set Infusion End Time from dose & start (≤10 mg/min and ≥60 min)",
+                "Auto-set Infusion End Time from dose & start (<=10 mg/min and >=60 min)",
                 value=True,
                 key="pt_autoset"
             )
-            st.caption(f"{guidance_msg_cur}  Suggested end time: **{suggested_end_pt.strftime('%H:%M')}**.")
+            st.caption(f"{guidance_msg_cur}  Suggested end time: {suggested_end_pt.strftime('%H:%M')}.")
 
             infusion_end_time_pt = st.time_input(
                 "Infusion End Time",
@@ -1008,7 +1005,7 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                 value=time(10, 0),
                 step=timedelta(minutes=15),
                 key="pt_peak_time",
-                help="Typically 1–2 h post-infusion end"
+                help="Typically 1-2 h post-infusion end"
             )
             trough_sample_time_pt = st.time_input(
                 "Trough Sample Time",
@@ -1048,12 +1045,12 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                     st.error("Timing Error: Trough sample time must be after peak sample time.")
                     timing_valid_pt = False
                 if time_from_inf_start_to_trough >= interval_pt:
-                    st.warning(f"Timing Warning: Trough drawn {format_hours_minutes(time_from_inf_start_to_trough)} after infusion start, which is ≥ interval (q{interval_pt}h). Ensure this is a true trough before the next dose.")
+                    st.warning(f"Timing Warning: Trough drawn {format_hours_minutes(time_from_inf_start_to_trough)} after infusion start, which is >= interval (q{interval_pt}h). Ensure this is a true trough before the next dose.")
 
                 if timing_valid_pt:
                     with st.spinner("Analyzing peak and trough levels..."):
                         try:
-                            # Sawchuk–Zaske individualized PK
+                            # Sawchuk-Zaske individualized PK
                             if time_from_peak_to_trough == 0:
                                 raise ValueError("Time between peak and trough samples cannot be zero.")
                             ke_ind = math.log(peak_measured_pt / trough_measured_pt) / time_from_peak_to_trough
@@ -1093,10 +1090,10 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                             pk_results = {
                                 'Calculation Method': 'Peak & Trough (Individualized)',
                                 'Individual Vd (L)': f"{vd_ind:.1f}",
-                                'Individual Ke (h⁻¹)': f"{ke_ind:.4f}",
+                                'Individual Ke (h^-1)': f"{ke_ind:.4f}",
                                 'Individual CL (L/h)': f"{cl_ind:.2f}",
-                                'Individual t½ (h)': f"{thalf_ind:.1f}",
-                                'Individual AUC₂₄ (mg·h/L)': f"{auc24_ind:.1f}",
+                                'Individual t1/2 (h)': f"{thalf_ind:.1f}",
+                                'Individual AUC24 (mg·h/L)': f"{auc24_ind:.1f}",
                                 'Measured Peak (mg/L)': f"{peak_measured_pt:.1f}",
                                 'Measured Trough (mg/L)': f"{trough_measured_pt:.1f}",
                                 'Extrapolated Cmax (mg/L)': f"{cmax_extrap:.1f}",
@@ -1108,16 +1105,16 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
 
                             st.subheader("Analysis Results")
                             st.info(
-                                f"Infusion Duration: **{format_hours_minutes(infusion_duration_h)}**, "
-                                f"Time Infusion End → Peak: **{format_hours_minutes(time_from_inf_end_to_peak)}**, "
-                                f"Time Peak → Trough: **{format_hours_minutes(time_from_peak_to_trough)}**"
+                                f"Infusion Duration: {format_hours_minutes(infusion_duration_h)}, "
+                                f"Time Infusion End -> Peak: {format_hours_minutes(time_from_inf_end_to_peak)}, "
+                                f"Time Peak -> Trough: {format_hours_minutes(time_from_peak_to_trough)}"
                             )
 
                             res_col1, res_col2 = st.columns(2)
                             with res_col1:
                                 st.subheader("Target Status")
                                 display_level_indicator("Measured Trough", trough_measured_pt, target_trough_range, "mg/L")
-                                display_level_indicator("Calculated AUC₂₄", auc24_ind, target_auc_range, "mg·h/L")
+                                display_level_indicator("Calculated AUC24", auc24_ind, target_auc_range, "mg·h/L")
                             with res_col2:
                                 st.subheader("Recommendation")
                                 st.markdown(f'<p class="recommendation-dose">{new_dose_rounded} mg q{interval_pt}h</p>', unsafe_allow_html=True)
@@ -1131,10 +1128,10 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 st.metric("Individual Vd (L)", f"{vd_ind:.1f}")
                                 st.metric("Individual CL (L/h)", f"{cl_ind:.2f}")
                             with pk_col2:
-                                st.metric("Individual Ke (h⁻¹)", f"{ke_ind:.4f}")
-                                st.metric("Individual t½ (h)", f"{thalf_ind:.1f}")
+                                st.metric("Individual Ke (h^-1)", f"{ke_ind:.4f}")
+                                st.metric("Individual t1/2 (h)", f"{thalf_ind:.1f}")
                             with pk_col3:
-                                st.metric("Individual AUC₂₄ (mg·h/L)", f"{auc24_ind:.1f}")
+                                st.metric("Individual AUC24 (mg·h/L)", f"{auc24_ind:.1f}")
                                 st.metric("Extrap. Cmax (mg/L)", f"{cmax_extrap:.1f}")
 
                             render_interpretation_st(
@@ -1163,12 +1160,11 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                     reasoning_text = llm_reasoner.generate_reasoning(patient_data, pk_results, results)
                                     display_llm_reasoning(reasoning_text)
 
-                            # ---- precompute strings for report ----
+                            # Precompute strings for report
                             weight_used_str = f"{crcl_data['weight_used']:.1f} kg" if crcl_data['weight_used'] is not None else "N/A"
                             ibw_str = f"{crcl_data['ibw']:.1f} kg" if crcl_data['ibw'] is not None else "N/A"
                             adjbw_str = f"{crcl_data['adjbw']:.1f} kg" if crcl_data['adjbw'] is not None else "N/A"
-                            target_auc_text = (f"{target_auc_range[0]}–{target_auc_range[1]}"
-                                               if target_auc_range[1] is not None else f"≥{target_auc_range[0]}")
+                            target_auc_text = (f"{target_auc_range[0]}-{target_auc_range[1]}" if target_auc_range[1] is not None else f">= {target_auc_range[0]}")
 
                             report_data = f"""Vancomycin TDM Report (Peak & Trough)
 Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -1196,12 +1192,12 @@ Regimen, Levels & Timing:
 
 Target: {target_level_desc}
 - Target Trough: {target_trough_range[0]}-{target_trough_range[1]} mg/L
-- Target AUC₂₄: {target_auc_text} mg·h/L
+- Target AUC24: {target_auc_text} mg·h/L
 
 Analysis Results (Individualized PK):
 {pd.Series(pk_results).to_string()}
 
-Infusion Guidance (suggested new dose): Infuse over ≥60 minutes; do not exceed 10 mg/min (≈ {minutes_rec_new} minutes recommended)
+Infusion Guidance (suggested new dose): Infuse over >=60 minutes; do not exceed 10 mg/min (~ {minutes_rec_new} minutes recommended)
 
 Clinical Notes:
 {clinical_notes if clinical_notes else 'N/A'}
@@ -1209,7 +1205,7 @@ Clinical Notes:
 Disclaimer: For educational purposes only. Verify calculations and clinical correlation.
 """
                             st.download_button(
-                                label="📄 Download Peak & Trough Analysis Report",
+                                label="Download Peak & Trough Analysis Report",
                                 data=report_data,
                                 file_name=f"vanco_peak_trough_analysis_{pid if pid else 'report'}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                                 mime="text/plain"
@@ -1224,10 +1220,10 @@ Disclaimer: For educational purposes only. Verify calculations and clinical corr
     # Footer
     st.markdown("---")
     st.caption("""
-**Disclaimer:** This tool is intended for educational and informational purposes only and does not constitute medical advice.
+Disclaimer: This tool is intended for educational and informational purposes only and does not constitute medical advice.
 Calculations are based on standard pharmacokinetic principles but may need adjustment based on individual patient factors and clinical context.
 Always consult with qualified healthcare professionals and local guidelines for clinical decision-making.
-*Reference: Basic Clinical Pharmacokinetics (6th Ed.), Clinical Pharmacokinetics Pharmacy Handbook (2nd Ed.), ASHP/IDSA Vancomycin Guidelines.*
+Reference: Basic Clinical Pharmacokinetics (6th Ed.), Clinical Pharmacokinetics Pharmacy Handbook (2nd Ed.), ASHP/IDSA Vancomycin Guidelines.
 
 Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com), Enhanced with RAG and LLM reasoning.
 """)
@@ -1239,4 +1235,3 @@ Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com), Enhanced with RAG and LL
 
 if __name__ == "__main__":
     main()
-```
