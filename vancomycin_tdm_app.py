@@ -1,4 +1,3 @@
-```python
 # -*- coding: utf-8 -*-
 # TDM-AID (Vancomycin) with RAG + LLM Reasoning
 # - Weight-choice rules for Cockcroft–Gault (TBW/IBW/AdjBW)
