@@ -802,8 +802,25 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
             elif crcl is None:
                 st.error("Cannot perform analysis: CrCl could not be calculated. Check patient details in the sidebar.")
             else:
-                time_since_last_dose_h = hours_diff(dose_time_to, sample_time_to)
                 timing_valid_to = True
+                # MODIFIED LOGIC TO HANDLE PRE-DOSE TROUGH INPUT
+                dt_dose = datetime.combine(date.today(), dose_time_to)
+                dt_sample = datetime.combine(date.today(), sample_time_to)
+
+                # If sample time is earlier on the same day as dose time, user likely entered the *next* dose time instead of the *last*.
+                if dt_sample < dt_dose:
+                    time_until_next_dose = (dt_dose - dt_sample).total_seconds() / 3600.0
+                    
+                    # Heuristic: if the time until dose is short (e.g., < 4 hours), assume it's a pre-dose level.
+                    if 0 < time_until_next_dose < 4:
+                         time_since_last_dose_h = interval_current_to - time_until_next_dose
+                         st.info(f"Note: Trough sample appears to be a pre-dose level. Time since last dose was calculated as **{format_hours_minutes(time_since_last_dose_h)}** based on the q{interval_current_to}h interval, assuming the dose time you provided was for the *next* scheduled dose.")
+                    else:
+                        # Fall back to original logic which assumes next day.
+                        time_since_last_dose_h = hours_diff(dose_time_to, sample_time_to)
+                else:
+                    time_since_last_dose_h = hours_diff(dose_time_to, sample_time_to)
+                
                 if time_since_last_dose_h <= 0:
                     st.error("Timing Error: Trough sample time must be after the last dose time.")
                     timing_valid_to = False
@@ -1032,7 +1049,6 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                 infusion_duration_h = hours_diff(infusion_start_time_pt, infusion_end_time_pt)
                 time_from_inf_end_to_peak = hours_diff(infusion_end_time_pt, peak_sample_time_pt)
                 time_from_peak_to_trough = hours_diff(peak_sample_time_pt, trough_sample_time_pt)
-                time_from_inf_start_to_trough = hours_diff(infusion_start_time_pt, trough_sample_time_pt)
 
                 timing_valid_pt = True
                 if infusion_duration_h <= 0:
@@ -1044,8 +1060,11 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                 if time_from_peak_to_trough <= 0:
                     st.error("Timing Error: Trough sample time must be after peak sample time.")
                     timing_valid_pt = False
-                if time_from_inf_start_to_trough >= interval_pt:
-                    st.warning(f"Timing Warning: Trough drawn {format_hours_minutes(time_from_inf_start_to_trough)} after infusion start, which is >= interval (q{interval_pt}h). Ensure this is a true trough before the next dose.")
+                
+                # REVISED, CLEARER WARNING LOGIC
+                if time_from_peak_to_trough >= interval_pt:
+                    st.warning(f"Timing Warning: The calculated time between your peak and trough samples ({format_hours_minutes(time_from_peak_to_trough)}) is longer than the dosing interval (q{interval_pt}h). Please verify that the sample times and dosing interval are correct for this patient.")
+                    timing_valid_pt = False
 
                 if timing_valid_pt:
                     with st.spinner("Analyzing peak and trough levels..."):
