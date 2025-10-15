@@ -1048,7 +1048,36 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
             else:
                 infusion_duration_h = hours_diff(infusion_start_time_pt, infusion_end_time_pt)
                 time_from_inf_end_to_peak = hours_diff(infusion_end_time_pt, peak_sample_time_pt)
-                time_from_peak_to_trough = hours_diff(peak_sample_time_pt, trough_sample_time_pt)
+
+                # --- NEW LOGIC for T' (time from peak to trough) calculation ---
+                time_from_trough_to_inf_start = hours_diff(trough_sample_time_pt, infusion_start_time_pt)
+                
+                is_predose_trough = False
+                # Heuristic: if trough is drawn shortly before infusion starts, it's a pre-dose trough.
+                if time_from_trough_to_inf_start < 4:
+                    is_predose_trough = True
+
+                if is_predose_trough:
+                    st.info("Note: A pre-dose trough time was detected. The trough value will be used, but the time for calculation will be projected to the end of the dosing interval.")
+                    
+                    # We need the time from the measured peak to the end of the dosing interval.
+                    # The end of the interval is `interval_pt` hours after the infusion started.
+                    dt_inf_start = datetime.combine(date.today(), infusion_start_time_pt)
+                    dt_peak = datetime.combine(date.today(), peak_sample_time_pt)
+
+                    # Handle peak on the next day if infusion is late at night
+                    if dt_peak < dt_inf_start:
+                        dt_peak += timedelta(days=1)
+                        
+                    dt_interval_end = dt_inf_start + timedelta(hours=interval_pt)
+                    
+                    time_from_peak_to_trough = (dt_interval_end - dt_peak).total_seconds() / 3600.0
+                else:
+                    # Original logic for post-dose trough
+                    st.info("Note: Trough time appears to be a post-dose level. Ensure it was drawn from the same dosing cycle as the peak.")
+                    time_from_peak_to_trough = hours_diff(peak_sample_time_pt, trough_sample_time_pt)
+
+                # --- END NEW LOGIC ---
 
                 timing_valid_pt = True
                 if infusion_duration_h <= 0:
@@ -1057,13 +1086,9 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                 if time_from_inf_end_to_peak < 0:
                     st.error("Timing Error: Peak sample time must be after infusion end time.")
                     timing_valid_pt = False
+                # The new `time_from_peak_to_trough` can be negative if the peak is after the interval end
                 if time_from_peak_to_trough <= 0:
-                    st.error("Timing Error: Trough sample time must be after peak sample time.")
-                    timing_valid_pt = False
-                
-                # REVISED, CLEARER WARNING LOGIC
-                if time_from_peak_to_trough >= interval_pt:
-                    st.warning(f"Timing Warning: The calculated time between your peak and trough samples ({format_hours_minutes(time_from_peak_to_trough)}) is longer than the dosing interval (q{interval_pt}h). Please verify that the sample times and dosing interval are correct for this patient.")
+                    st.error("Timing Error: Peak sample time appears to be after the end of the dosing interval. Please check all times and the interval duration.")
                     timing_valid_pt = False
 
                 if timing_valid_pt:
@@ -1254,3 +1279,4 @@ Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com), Enhanced with RAG and LL
 
 if __name__ == "__main__":
     main()
+
