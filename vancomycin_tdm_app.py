@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # TDM-AID (Vancomycin) with RAG + LLM Reasoning
 # - Weight-choice rules for Cockcroft-Gault (TBW/IBW/AdjBW)
+# - ADDED: Manual override for CrCl weight basis (Actual, Ideal, Adjusted)
 # - Infusion-time guidance (>=60 min and <=10 mg/min) + auto-suggest end time
 # - Embeddings upgraded to text-embedding-3-small with robust fallback
 #
@@ -375,14 +376,47 @@ def choose_weight_for_cg(tbw_kg: float, ibw_kg: float):
     else:
         return ibw_kg, "IBW (100-120%)"
 
-def calculate_crcl_cg(age, tbw_kg, scr_umol, is_female, height_cm):
+def calculate_crcl_cg(age, tbw_kg, scr_umol, is_female, height_cm, weight_choice="Auto-select"):
     if not all([age, tbw_kg, scr_umol]) or age <= 0 or tbw_kg <= 0 or scr_umol <= 0:
         return {'crcl': None, 'weight_used': None, 'weight_method': 'N/A', 'ibw': None, 'adjbw': None}
+
+    # Always calculate IBW and AdjBW for reference and potential use
     ibw_kg = ibw_devine(height_cm, is_female) if height_cm else None
-    wt_used, wt_method = choose_weight_for_cg(tbw_kg, ibw_kg if ibw_kg else tbw_kg)
+    adjbw_kg = adjbw_func(ibw_kg, tbw_kg) if ibw_kg is not None else None
+
+    # Determine which weight to use based on user choice
+    wt_used = None
+    wt_method = ""
+
+    if weight_choice == "Actual Body Weight":
+        wt_used = tbw_kg
+        wt_method = "TBW (manual)"
+    elif weight_choice == "Ideal Body Weight":
+        if ibw_kg is not None:
+            wt_used = ibw_kg
+            wt_method = "IBW (manual)"
+        else:  # Fallback if height not provided
+            wt_used, wt_method = choose_weight_for_cg(tbw_kg, ibw_kg)
+            wt_method += " (IBW fallback)"
+    elif weight_choice == "Adjusted Body Weight":
+        if adjbw_kg is not None:
+            wt_used = adjbw_kg
+            wt_method = "AdjBW (manual)"
+        else:  # Fallback if height not provided
+            wt_used, wt_method = choose_weight_for_cg(tbw_kg, ibw_kg)
+            wt_method += " (AdjBW fallback)"
+    else:  # Default to "Auto-select"
+        wt_used, wt_method = choose_weight_for_cg(tbw_kg, ibw_kg if ibw_kg else tbw_kg)
+
+    # If for any reason weight is still not set, fallback to TBW
+    if wt_used is None:
+        wt_used = tbw_kg
+        wt_method = "TBW (ultimate fallback)"
+
     scr_mgdl = scr_umol / 88.4
     if scr_mgdl <= 0:
-        return {'crcl': None, 'weight_used': wt_used, 'weight_method': wt_method, 'ibw': ibw_kg, 'adjbw': (adjbw_func(ibw_kg, tbw_kg) if ibw_kg else None)}
+        return {'crcl': None, 'weight_used': wt_used, 'weight_method': wt_method, 'ibw': ibw_kg, 'adjbw': adjbw_kg}
+
     crcl = ((140 - age) * wt_used) / (72 * scr_mgdl)
     if is_female:
         crcl *= 0.85
@@ -392,7 +426,7 @@ def calculate_crcl_cg(age, tbw_kg, scr_umol, is_female, height_cm):
         'weight_used': wt_used,
         'weight_method': wt_method,
         'ibw': ibw_kg,
-        'adjbw': (adjbw_func(ibw_kg, tbw_kg) if ibw_kg else None)
+        'adjbw': adjbw_kg
     }
 
 # Target status + UI helpers
@@ -618,9 +652,17 @@ def main():
             with col_fem:
                 st.markdown('<div style="height: 29px;"></div>', unsafe_allow_html=True)
                 fem = st.checkbox("Female", value=False)
+        
+        # ADDED: Weight selection for CrCl
+        crcl_weight_choice = st.selectbox(
+            "CrCl Weight Basis",
+            options=["Auto-select", "Actual Body Weight", "Ideal Body Weight", "Adjusted Body Weight"],
+            index=0,
+            help="Choose the weight for Cockcroft-Gault. 'Auto-select' uses standard criteria (TBW if <IBW, IBW if 100-120% IBW, AdjBW if >120% IBW)."
+        )
 
-        # CrCl
-        crcl_data = calculate_crcl_cg(age, wt, scr_umol, fem, height_cm)
+        # CrCl Calculation (UPDATED CALL)
+        crcl_data = calculate_crcl_cg(age, wt, scr_umol, fem, height_cm, crcl_weight_choice)
         crcl = crcl_data['crcl']
         if crcl is not None:
             st.metric(label="Estimated CrCl (mL/min)", value=f"{crcl:.1f}")
@@ -869,7 +911,7 @@ Disclaimer: For educational purposes only. Verify with clinical guidelines.
                             res_col1, res_col2 = st.columns(2)
                             with res_col1:
                                 st.subheader("Target Status")
-                                display_level_indicator("Measured Trough", trough_measured_to, target_trrough_range if False else target_trough_range, "mg/L")
+                                display_level_indicator("Measured Trough", trough_measured_to, target_trough_range if False else target_trough_range, "mg/L")
                                 display_level_indicator("Estimated AUC24", auc24_est, target_auc_range, "mg·h/L")
                             with res_col2:
                                 st.subheader("Recommendation")
@@ -1279,4 +1321,3 @@ Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com), Enhanced with RAG and LL
 
 if __name__ == "__main__":
     main()
-
