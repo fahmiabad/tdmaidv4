@@ -533,23 +533,25 @@ def display_llm_reasoning(reasoning_text):
     st.subheader("Expert Pharmacokinetic Analysis")
     st.markdown(f'<div class="reasoning"><p class="reasoning-title">Clinical Pharmacist Assessment</p>{reasoning_text}</div>', unsafe_allow_html=True)
 
-def render_interpretation_st_peak_trough(trough_status, cmin_extrap, peak_status, cmax_extrap, thalf, interval_h, new_dose, target_desc, pk_method):
+def render_interpretation_st_peak_trough(trough_status, cmin_extrap, peak_status, cmax_extrap, auc_status, auc24, thalf, interval_h, new_dose, target_desc, pk_method):
     if not all([
-        trough_status, cmin_extrap is not None, thalf is not None, interval_h, new_dose is not None, target_desc
+        trough_status, cmin_extrap is not None, thalf is not None, interval_h, new_dose is not None, target_desc, auc24 is not None
     ]):
         st.warning("Interpretation cannot be generated due to missing calculation results.")
         return
         
     rec_action = "adjust"
-    if "BELOW" in trough_status:
+    if "BELOW" in trough_status or "BELOW" in auc_status:
         rec_action = "increase"
-    elif "ABOVE" in trough_status:
+    elif "ABOVE" in trough_status or "ABOVE" in auc_status:
         rec_action = "decrease"
     else:
         rec_action = "maintain"
 
     target_trough_str = "10-15 mg/L" if "Empirical" in target_desc else "15-20 mg/L"
     target_peak_str = "30-40 mg/L" # General target
+    target_auc_str = "400-600 mg·h/L" if "Empirical" in target_desc else ">600 mg·h/L"
+
 
     with st.expander("View Detailed Interpretation", expanded=True):
         st.subheader("Assessment")
@@ -557,6 +559,7 @@ def render_interpretation_st_peak_trough(trough_status, cmin_extrap, peak_status
 - **Method:** {pk_method}
 - **Extrapolated Trough (Cmin):** {cmin_extrap:.1f} mg/L ({trough_status.lower()})
 - **Extrapolated Peak (Cmax):** {cmax_extrap:.1f} mg/L ({peak_status.lower()})
+- **Calculated AUC₂₄:** {auc24:.1f} mg·h/L ({auc_status.lower()})
 - **Calculated Half-life:** {f'{thalf:.1f}' if thalf is not None else 'N/A'} h
 - **Current Interval:** q{interval_h}h (Interval is likely {'appropriate' if thalf is not None and interval_h >= thalf * 1.2 else 'potentially too long/short relative to half-life'})
 """
@@ -565,12 +568,12 @@ def render_interpretation_st_peak_trough(trough_status, cmin_extrap, peak_status
         recommendation_text = f"""
 - **Action:** Consider **{rec_action}ing** the dose.
 - **Suggested Regimen:** **{new_dose} mg q{interval_h}h**
-- **Goal:** To achieve target trough ({target_trough_str}) and peak ({target_peak_str}).
+- **Goal:** To achieve target trough ({target_trough_str}), peak ({target_peak_str}), and AUC ({target_auc_str}).
 """
         st.markdown(recommendation_text)
         st.subheader("Rationale")
         rationale_text = f"""
-The recommendation aims to align the patient's trough and peak levels with the selected therapeutic targets ({target_desc}).
+The recommendation aims to align the patient's trough, peak, and AUC levels with the selected therapeutic targets ({target_desc}).
 The adjustment is based on the calculated pharmacokinetic parameters derived from the {pk_method.lower()} analysis.
 """
         st.markdown(rationale_text)
@@ -672,8 +675,8 @@ def main():
             target_level_desc = st.selectbox(
                 "Select target level:",
                 options=[
-                    "Empirical (Target Trough ~10-15 mg/L)",
-                    "Definitive/Severe (Target Trough ~15-20 mg/L)"
+                    "Empirical (Target AUC24 400-600 mg·h/L; Trough ~10-15 mg/L)",
+                    "Definitive/Severe (Target AUC24 >600 mg·h/L; Trough ~15-20 mg/L)"
                 ],
                 index=0,
                 label_visibility="collapsed",
@@ -681,10 +684,10 @@ def main():
             )
             if "Empirical" in target_level_desc:
                 target_trough_range = (10.0, 15.0)
-                # target_auc_range = (400.0, 600.0) # AUC not used in new method
+                target_auc_range = (400.0, 600.0) 
             else:
                 target_trough_range = (15.0, 20.0)
-                # target_auc_range = (600.0, None) # AUC not used in new method
+                target_auc_range = (600.0, None)
             
             # General peak target, not for calculation but for status check
             target_peak_range = (30.0, 40.0)
@@ -1060,8 +1063,9 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                 T = float(interval_pt) # Dosing interval
                 
                 # Time differences in hours
+                infusion_duration_h = hours_diff(infusion_start_time_pt, infusion_end_time_pt) # This is t' from the AUC formula
                 time_between_samples = hours_diff(t1, t2)
-                t_prime = hours_diff(infusion_end_time_pt, t2) # t' from guide
+                t_prime = hours_diff(infusion_end_time_pt, t2) # t' from Cmax guide
                 
                 timing_valid_pt = True
                 if time_between_samples <= 0:
@@ -1101,6 +1105,12 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 raise ValueError("Vd denominator is zero. Cannot calculate.")
                             vd_ind_per_kg = dose_levels_pt / vd_denominator
                             vd_ind_total = vd_ind_per_kg * wt # Total Vd in L
+                            
+                            # AUC Calculation using Trapezoidal Method
+                            auc_inf = infusion_duration_h * (cmin_extrap + cmax_extrap) / 2
+                            auc_elim = (cmax_extrap - cmin_extrap) / ke_ind if ke_ind > 0 else 0
+                            auc_interval = auc_inf + auc_elim
+                            auc24_trap = auc_interval * (24 / T) if T > 0 else 0
 
                             # f & g) New Dose Recommendation
                             # Define a target Cmax based on the selected trough range
@@ -1115,6 +1125,7 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
 
                             trough_status = check_target_status(cmin_extrap, target_trough_range)
                             peak_status = check_target_status(cmax_extrap, target_peak_range)
+                            auc_status = check_target_status(auc24_trap, target_auc_range)
 
                             pk_results = {
                                 'Calculation Method': 'Peak & Trough (Guide Formula)',
@@ -1123,8 +1134,10 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 'Individual t1/2 (h)': f"{thalf_ind:.1f}",
                                 'Extrapolated Cmax (mg/L)': f"{cmax_extrap:.1f}",
                                 'Extrapolated Cmin (mg/L)': f"{cmin_extrap:.1f}",
+                                'AUC24 (Trapezoidal)': f"{auc24_trap:.1f}",
                                 'Trough Status': trough_status,
                                 'Peak Status': peak_status,
+                                'AUC Status': auc_status,
                                 'Suggested New Dose': f"{new_dose_rounded} mg q{interval_pt}h",
                                 'Predicted Cmin with New Dose': f"{expected_cmin_new_dose:.1f} mg/L"
                             }
@@ -1142,6 +1155,7 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 st.subheader("Target Status")
                                 display_level_indicator("Extrapolated Trough (Cmin)", cmin_extrap, target_trough_range, "mg/L")
                                 display_level_indicator("Extrapolated Peak (Cmax)", cmax_extrap, target_peak_range, "mg/L")
+                                display_level_indicator("Calculated AUC24", auc24_trap, target_auc_range, "mg·h/L")
                             with res_col2:
                                 st.subheader("Recommendation")
                                 st.markdown(f'<p class="recommendation-dose">{new_dose_rounded} mg q{interval_pt}h</p>', unsafe_allow_html=True)
@@ -1166,6 +1180,8 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 cmin_extrap=cmin_extrap,
                                 peak_status=peak_status,
                                 cmax_extrap=cmax_extrap,
+                                auc_status=auc_status,
+                                auc24=auc24_trap,
                                 thalf=thalf_ind,
                                 interval_h=interval_pt,
                                 new_dose=new_dose_rounded,
