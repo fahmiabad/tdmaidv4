@@ -1096,8 +1096,17 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                             # c) Cmax Calculation
                             cmax_extrap = peak_measured_pt * math.exp(ke_ind * t_prime)
                             
-                            # d) Cmin Calculation
-                            cmin_extrap = cmax_extrap * math.exp(-ke_ind * T)
+                            # d) Cmin Calculation (MODIFIED)
+                            # METHOD 1: Extrapolate from Cmax down (less reliable due to distribution phase effects)
+                            cmin_from_peak = cmax_extrap * math.exp(-ke_ind * T)
+                            
+                            # METHOD 2: Extrapolate from measured trough (Cpre) forward (more reliable, now primary method)
+                            time_trough_to_dose = hours_diff(trough_sample_time_pt, infusion_start_time_pt)
+                            if time_trough_to_dose < 0:
+                                st.warning("Timing Warning: Trough sample drawn after infusion started. Cmin (from Trough) may be inaccurate.")
+                                time_trough_to_dose = 0
+                            cmin_extrap = trough_measured_pt * math.exp(-ke_ind * time_trough_to_dose)
+
 
                             # e) Vd Calculation (L/kg)
                             vd_denominator = (wt * cmax_extrap * (1 - math.exp(-ke_ind * T)))
@@ -1120,8 +1129,13 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                             new_dose_rounded = round(new_dose_raw / 250) * 250
                             
                             # Predict new Cmin with the new dose
-                            expected_cmax_new_dose = new_dose_rounded / (vd_ind_total * (1 - math.exp(-ke_ind * T)))
-                            expected_cmin_new_dose = expected_cmax_new_dose * math.exp(-ke_ind * T)
+                            if (vd_ind_total > 0) and (1-math.exp(-ke_ind * T) > 0):
+                                expected_cmax_new_dose = new_dose_rounded / (vd_ind_total * (1 - math.exp(-ke_ind * T)))
+                                expected_cmin_new_dose = expected_cmax_new_dose * math.exp(-ke_ind * T)
+                            else:
+                                expected_cmax_new_dose = 0
+                                expected_cmin_new_dose = 0
+
 
                             trough_status = check_target_status(cmin_extrap, target_trough_range)
                             peak_status = check_target_status(cmax_extrap, target_peak_range)
@@ -1133,7 +1147,8 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 'Individual Ke (h^-1)': f"{ke_ind:.4f}",
                                 'Individual t1/2 (h)': f"{thalf_ind:.1f}",
                                 'Extrapolated Cmax (mg/L)': f"{cmax_extrap:.1f}",
-                                'Extrapolated Cmin (mg/L)': f"{cmin_extrap:.1f}",
+                                'Extrapolated Cmin (from Trough)': f"{cmin_extrap:.1f}",
+                                'Extrapolated Cmin (from Peak, for reference)': f"{cmin_from_peak:.1f}",
                                 'AUC24 (Trapezoidal)': f"{auc24_trap:.1f}",
                                 'Trough Status': trough_status,
                                 'Peak Status': peak_status,
@@ -1149,6 +1164,8 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
                                 f"Time Infusion End -> Peak (t'): {format_hours_minutes(t_prime)}"
                             )
                             st.info(analysis_summary_string)
+                            st.caption(f"Primary Cmin is calculated by extrapolating the measured trough forward, as this is generally more reliable.")
+
 
                             res_col1, res_col2 = st.columns(2)
                             with res_col1:
@@ -1273,4 +1290,3 @@ Developed by Dr. Fahmi Hassan (fahmibinabad@gmail.com), Enhanced with RAG and LL
 
 if __name__ == "__main__":
     main()
-
