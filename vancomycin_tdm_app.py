@@ -2,7 +2,7 @@
 # TDM-AID (Vancomycin) with RAG + LLM Reasoning
 # - Weight-choice rules for Cockcroft-Gault (TBW/IBW/AdjBW)
 # - ADDED: Manual override for CrCl weight basis (Actual, Ideal, Adjusted)
-# - Infusion-time guidance (>=60 min and <=10 mg/min) + auto-suggest end time
+# - Infusion-time guidance (>=60 min and <=10 mg/min)
 # - Embeddings upgraded to text-embedding-3-small with robust fallback
 #
 # NOTE: This app preserves your calculation methods (pop-PK trough-only & Sawchuk-Zaske P+T).
@@ -1042,19 +1042,14 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
             )
 
             # Compute guidance & suggested end time
-            guidance_msg_cur, minutes_cap_cur, minutes_rec_cur = infusion_guidance(dose_levels_pt)
+            guidance_msg_cur, _, minutes_rec_cur = infusion_guidance(dose_levels_pt)
             suggested_end_pt = add_minutes_to_time(infusion_start_time_pt, minutes_rec_cur)
 
-            auto_set_end = st.checkbox(
-                "Auto-set Infusion End Time from dose & start (<=10 mg/min and >=60 min)",
-                value=True,
-                key="pt_autoset"
-            )
-            st.caption(f"{guidance_msg_cur}  Suggested end time: {suggested_end_pt.strftime('%H:%M')}.")
+            st.caption(f"{guidance_msg_cur} A suggested end time is {suggested_end_pt.strftime('%H:%M')}.")
 
             infusion_end_time_pt = st.time_input(
                 "Infusion End Time",
-                value=(suggested_end_pt if auto_set_end else time(9, 0)),
+                value=time(9, 0), # User must now manually set this. A default is provided.
                 step=timedelta(minutes=15),
                 key="pt_inf_end"
             )
@@ -1075,10 +1070,6 @@ Disclaimer: Trough-only analysis uses population estimates and has limitations. 
             )
 
             submitted_pt = st.form_submit_button("Run Peak & Trough Analysis")
-
-        # Ensure calculation uses suggested end if auto-set is on
-        if submitted_pt and auto_set_end:
-            infusion_end_time_pt = suggested_end_pt
 
         if submitted_pt:
             if not all([dose_levels_pt, interval_pt, peak_measured_pt, trough_measured_pt, infusion_start_time_pt, infusion_end_time_pt, peak_sample_time_pt, trough_sample_time_pt]):
